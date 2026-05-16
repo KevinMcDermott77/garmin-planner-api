@@ -1,10 +1,22 @@
+from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
+from app.db import validate_supabase_env
+
 load_dotenv()
 
-app = FastAPI(title="garmin-planner API", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    validate_supabase_env()
+    yield
+
+
+app = FastAPI(title="garmin-planner API", version="0.1.0", lifespan=lifespan)
 
 # Permissive CORS for local dev. Tighten before deploy.
 app.add_middleware(

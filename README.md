@@ -14,7 +14,23 @@ python -m pip install -e .[dev]
 Copy-Item .env.example .env
 ```
 
-Edit `.env` and set `ANTHROPIC_API_KEY`.
+Edit `.env` and set these variables:
+
+```powershell
+ANTHROPIC_API_KEY
+SUPABASE_URL
+SUPABASE_SERVICE_KEY
+DATABASE_URL
+```
+
+Before first run, open the Supabase SQL editor and run:
+
+```powershell
+Get-Content .\migrations\001_initial_schema.sql
+```
+
+Paste the SQL into Supabase and execute it. The app does not run migrations
+programmatically.
 
 ## Run
 
@@ -34,14 +50,32 @@ OpenAPI docs:
 Start-Process http://localhost:8000/docs
 ```
 
-## Preview Endpoint
+## Plan Endpoints
 
-Live curl example:
+Generate and persist a plan:
 
 ```powershell
-curl.exe -X POST "http://localhost:8000/api/plans/preview" `
+curl.exe -X POST "http://localhost:8000/api/plans/generate" `
   -H "Content-Type: application/json" `
   -d "{\"profile\":{\"name\":\"Joe\",\"weekly_km_recent\":35,\"longest_run_km_recent\":18,\"easy_pace_min_per_km\":6.0,\"days_per_week\":5},\"goal\":\"sub-4 marathon\",\"weeks\":16,\"race_date\":\"2026-10-25\",\"history_summary\":null,\"notes\":null}"
+```
+
+Retrieve one saved plan:
+
+```powershell
+curl.exe "http://localhost:8000/api/plans/YOUR_PLAN_ID"
+```
+
+List saved plans:
+
+```powershell
+curl.exe "http://localhost:8000/api/plans"
+```
+
+List saved plans for one profile:
+
+```powershell
+curl.exe "http://localhost:8000/api/plans?profile_id=YOUR_PROFILE_ID"
 ```
 
 ## Tests
