@@ -1,5 +1,6 @@
-from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -30,6 +31,11 @@ app.add_middleware(
 from app.routers import plans  # noqa: E402
 
 app.include_router(plans.router, prefix="/api/plans", tags=["plans"])
+
+if os.getenv("DEV_MODE", "").lower() == "true":
+    from app.routers import dev  # noqa: E402
+
+    app.include_router(dev.router, prefix="/api/dev", tags=["dev"])
 
 
 @app.get("/")

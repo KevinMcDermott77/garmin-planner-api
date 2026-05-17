@@ -15,9 +15,10 @@ class PersistenceError(RuntimeError):
     """Raised when a persistence operation cannot be completed."""
 
 
-def save_profile(profile: AthleteProfile) -> str:
+def save_profile(profile: AthleteProfile, user_id: str) -> str:
     """Persist an athlete profile and return its generated id."""
     payload = profile.model_dump(mode="json")
+    payload["user_id"] = user_id
     response = get_supabase_client().table("profiles").insert(payload).execute()
     row = _single_row(response, "profile")
     return str(row["id"])
@@ -25,6 +26,7 @@ def save_profile(profile: AthleteProfile) -> str:
 
 def save_plan(
     profile_id: str,
+    user_id: str,
     goal: str,
     weeks: int,
     race_date: date | None,
@@ -35,6 +37,7 @@ def save_plan(
     """Persist a plan and its scheduled sessions, returning the plan id."""
     plan_payload = {
         "profile_id": profile_id,
+        "user_id": user_id,
         "goal": goal,
         "weeks": weeks,
         "race_date": race_date.isoformat() if race_date else None,
@@ -53,10 +56,10 @@ def save_plan(
     return plan_id
 
 
-def get_plan(plan_id: str) -> dict[str, Any] | None:
+def get_plan(plan_id: str, user_id: str) -> dict[str, Any] | None:
     """Return a plan row with scheduled sessions, or None when not found."""
     client = get_supabase_client()
-    plan_response = client.table("plans").select("*").eq("id", plan_id).limit(1).execute()
+    plan_response = client.table("plans").select("*").eq("id", plan_id).eq("user_id", user_id).limit(1).execute()
     rows = _rows(plan_response)
     if not rows:
         return None
@@ -74,16 +77,15 @@ def get_plan(plan_id: str) -> dict[str, Any] | None:
     return plan_row
 
 
-def list_plans(profile_id: str | None = None) -> list[dict[str, Any]]:
+def list_plans(user_id: str) -> list[dict[str, Any]]:
     """Return summary rows for saved plans."""
     query = (
         get_supabase_client()
         .table("plans")
         .select("id, goal, weeks, status, created_at")
+        .eq("user_id", user_id)
         .order("created_at", desc=True)
     )
-    if profile_id:
-        query = query.eq("profile_id", profile_id)
     return _rows(query.execute())
 
 

@@ -3,9 +3,10 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from app.auth import get_current_user
 from app.services.generator import PlanGenerationError, generate_plan
 from app.services.models import Plan
 from app.services import persistence
@@ -32,8 +33,15 @@ class PlanGenerateResponse(BaseModel):
     tokens: dict
 
 
-@router.post("/generate", response_model=PlanGenerateResponse)
-def generate_plan_endpoint(request: PlanGenerateRequest) -> PlanGenerateResponse:
+AUTH_RESPONSES = {401: {"description": "Missing or invalid bearer token"}}
+
+
+@router.post("/generate", response_model=PlanGenerateResponse, responses=AUTH_RESPONSES)
+def generate_plan_endpoint(
+    request: PlanGenerateRequest,
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> PlanGenerateResponse:
+    user_id = str(current_user["sub"])
     assessment = assess_goal(
         request.goal,
         request.profile,
@@ -57,9 +65,10 @@ def generate_plan_endpoint(request: PlanGenerateRequest) -> PlanGenerateResponse
 
     profile_id: str | None = None
     try:
-        profile_id = persistence.save_profile(request.profile)
+        profile_id = persistence.save_profile(request.profile, user_id=user_id)
         plan_id = persistence.save_plan(
             profile_id=profile_id,
+            user_id=user_id,
             goal=request.goal,
             weeks=request.weeks,
             race_date=request.race_date,
@@ -88,18 +97,21 @@ def generate_plan_endpoint(request: PlanGenerateRequest) -> PlanGenerateResponse
     )
 
 
-@router.get("")
-def list_saved_plans(profile_id: str | None = Query(default=None)) -> list[dict[str, Any]]:
+@router.get("", responses=AUTH_RESPONSES)
+def list_saved_plans(current_user: dict[str, Any] = Depends(get_current_user)) -> list[dict[str, Any]]:
     try:
-        return persistence.list_plans(profile_id=profile_id)
+        return persistence.list_plans(user_id=str(current_user["sub"]))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Could not list plans: {exc}") from exc
 
 
-@router.get("/{plan_id}")
-def get_saved_plan(plan_id: str) -> dict[str, Any]:
+@router.get("/{plan_id}", responses={**AUTH_RESPONSES, 404: {"description": "Plan not found"}})
+def get_saved_plan(
+    plan_id: str,
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
     try:
-        plan = persistence.get_plan(plan_id)
+        plan = persistence.get_plan(plan_id, user_id=str(current_user["sub"]))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Could not retrieve plan: {exc}") from exc
     if plan is None:

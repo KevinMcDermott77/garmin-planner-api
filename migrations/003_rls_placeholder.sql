@@ -1,0 +1,74 @@
+-- NOT YET APPLIED. Production hardening.
+-- The app currently relies on backend-enforced user scoping via the service_role
+-- client. Before any real users, apply these policies and switch reads/writes to
+-- a user-scoped client (defence in depth).
+--
+-- This file is intentionally comments only. Do not execute policy changes until
+-- the application has been updated and tested for user-scoped database access.
+--
+-- alter table profiles enable row level security;
+-- alter table plans enable row level security;
+-- alter table scheduled_sessions enable row level security;
+--
+-- create policy "profiles_select_own"
+--   on profiles for select
+--   using (auth.uid() = user_id);
+--
+-- create policy "profiles_insert_own"
+--   on profiles for insert
+--   with check (auth.uid() = user_id);
+--
+-- create policy "profiles_update_own"
+--   on profiles for update
+--   using (auth.uid() = user_id)
+--   with check (auth.uid() = user_id);
+--
+-- create policy "plans_select_own"
+--   on plans for select
+--   using (auth.uid() = user_id);
+--
+-- create policy "plans_insert_own"
+--   on plans for insert
+--   with check (auth.uid() = user_id);
+--
+-- create policy "plans_update_own"
+--   on plans for update
+--   using (auth.uid() = user_id)
+--   with check (auth.uid() = user_id);
+--
+-- create policy "scheduled_sessions_select_own"
+--   on scheduled_sessions for select
+--   using (
+--     exists (
+--       select 1 from plans
+--       where plans.id = scheduled_sessions.plan_id
+--       and plans.user_id = auth.uid()
+--     )
+--   );
+--
+-- create policy "scheduled_sessions_insert_own"
+--   on scheduled_sessions for insert
+--   with check (
+--     exists (
+--       select 1 from plans
+--       where plans.id = scheduled_sessions.plan_id
+--       and plans.user_id = auth.uid()
+--     )
+--   );
+--
+-- create policy "scheduled_sessions_update_own"
+--   on scheduled_sessions for update
+--   using (
+--     exists (
+--       select 1 from plans
+--       where plans.id = scheduled_sessions.plan_id
+--       and plans.user_id = auth.uid()
+--     )
+--   )
+--   with check (
+--     exists (
+--       select 1 from plans
+--       where plans.id = scheduled_sessions.plan_id
+--       and plans.user_id = auth.uid()
+--     )
+--   );

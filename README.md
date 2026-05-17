@@ -21,7 +21,24 @@ ANTHROPIC_API_KEY
 SUPABASE_URL
 SUPABASE_SERVICE_KEY
 DATABASE_URL
+DEV_MODE
 ```
+
+Optional legacy auth variable:
+
+```powershell
+SUPABASE_JWT_SECRET
+```
+
+JWT verification supports both Supabase signing modes:
+
+- New Supabase projects use asymmetric signing keys. The API verifies these
+  tokens automatically from `SUPABASE_URL/auth/v1/.well-known/jwks.json`.
+- Legacy HS256 projects can also set `SUPABASE_JWT_SECRET`. Find it in
+  Supabase under `Settings -> API -> JWT Settings -> JWT Secret`.
+
+Leave `SUPABASE_JWT_SECRET` empty unless your project still uses legacy HS256
+tokens.
 
 Before first run, open the Supabase SQL editor and run:
 
@@ -29,8 +46,43 @@ Before first run, open the Supabase SQL editor and run:
 Get-Content .\migrations\001_initial_schema.sql
 ```
 
-Paste the SQL into Supabase and execute it. The app does not run migrations
-programmatically.
+Then run the auth ownership migration:
+
+```powershell
+Get-Content .\migrations\002_add_user_id.sql
+```
+
+Paste each SQL file into Supabase and execute it. The app does not run
+migrations programmatically.
+
+`migrations/003_rls_placeholder.sql` is comments only. It documents the
+production RLS policies to apply before real users, but it is not meant to be
+run in the current development posture.
+
+## Database Security Posture
+
+The backend currently uses a service-role Supabase client for database reads and
+writes. This intentionally bypasses RLS during development. The API validates
+the user's JWT itself, then sets and filters `user_id` in application code for
+every profile and plan operation.
+
+Do not inject a user's access token into the shared Supabase database client.
+Doing so changes the `Authorization` header away from the service-role key,
+re-enables RLS evaluation, and causes inserts to fail until production RLS
+policies are configured.
+
+Before production, use `migrations/003_rls_placeholder.sql` as the hardening
+checklist: enable RLS, add user-scoped policies, then test switching database
+access to user-scoped clients for defence in depth.
+
+For local curl testing before the frontend exists, set this in `.env`:
+
+```powershell
+DEV_MODE=true
+```
+
+Restart the API after changing `DEV_MODE`. The `/api/dev/token` helper is only
+registered when `DEV_MODE=true`; keep it disabled or remove it before production.
 
 ## Run
 
@@ -52,30 +104,54 @@ Start-Process http://localhost:8000/docs
 
 ## Plan Endpoints
 
+Get a dev access token:
+
+```powershell
+$tokenResponse = Invoke-RestMethod -Method Post "http://localhost:8000/api/dev/token" `
+  -ContentType "application/json" `
+  -Body '{"email":"runner@example.com","password":"your-test-password"}'
+
+$token = $tokenResponse.access_token
+```
+
 Generate and persist a plan:
 
 ```powershell
-curl.exe -X POST "http://localhost:8000/api/plans/generate" `
-  -H "Content-Type: application/json" `
-  -d "{\"profile\":{\"name\":\"Joe\",\"weekly_km_recent\":35,\"longest_run_km_recent\":18,\"easy_pace_min_per_km\":6.0,\"days_per_week\":5},\"goal\":\"sub-4 marathon\",\"weeks\":16,\"race_date\":\"2026-10-25\",\"history_summary\":null,\"notes\":null}"
+$generateBody = @{
+  profile = @{
+    name = "Joe"
+    weekly_km_recent = 35
+    longest_run_km_recent = 18
+    easy_pace_min_per_km = 6.0
+    days_per_week = 5
+  }
+  goal = "sub-4 marathon"
+  weeks = 16
+  race_date = "2026-10-25"
+  history_summary = $null
+  notes = $null
+} | ConvertTo-Json -Depth 20
+
+$generated = Invoke-RestMethod -Method Post "http://localhost:8000/api/plans/generate" `
+  -Headers @{ Authorization = "Bearer $token" } `
+  -ContentType "application/json" `
+  -Body $generateBody
+
+$generated.plan_id
 ```
 
 Retrieve one saved plan:
 
 ```powershell
-curl.exe "http://localhost:8000/api/plans/YOUR_PLAN_ID"
+Invoke-RestMethod "http://localhost:8000/api/plans/$($generated.plan_id)" `
+  -Headers @{ Authorization = "Bearer $token" }
 ```
 
-List saved plans:
+List your saved plans:
 
 ```powershell
-curl.exe "http://localhost:8000/api/plans"
-```
-
-List saved plans for one profile:
-
-```powershell
-curl.exe "http://localhost:8000/api/plans?profile_id=YOUR_PROFILE_ID"
+Invoke-RestMethod "http://localhost:8000/api/plans" `
+  -Headers @{ Authorization = "Bearer $token" }
 ```
 
 ## Tests
