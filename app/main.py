@@ -22,15 +22,16 @@ app = FastAPI(title="garmin-planner API", version="0.1.0", lifespan=lifespan)
 # Permissive CORS for local dev. Tighten before deploy.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["http://localhost:3000", "http://localhost:3001"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-from app.routers import plans  # noqa: E402
+from app.routers import plans, race  # noqa: E402
 
 app.include_router(plans.router, prefix="/api/plans", tags=["plans"])
+app.include_router(race.router, prefix="/api/race", tags=["race"])
 
 if os.getenv("DEV_MODE", "").lower() == "true":
     from app.routers import dev  # noqa: E402
