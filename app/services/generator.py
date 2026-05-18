@@ -161,6 +161,19 @@ Programming rules:
 - For marathon goals, build long runs and weekly volume enough to support the
   target, using the required_peak_weekly_km value as a hard planning anchor.
 - Use steps for structured workouts when useful, especially intervals and tempo work.
+- Every unstructured running session must include a concrete target pace range.
+  For easy, long, and recovery sessions with distance_km set and steps=[],
+  populate pace_low_min_per_km and pace_high_min_per_km. Derive the range from
+  the athlete's current easy pace when supplied, and from the goal pace and
+  session type when a time goal is supplied. For a marathon goal with marathon
+  pace (MP), useful defaults are:
+  - easy: roughly MP + 0:45 to MP + 1:15 per km
+  - long: roughly MP + 0:30 to MP + 1:00 per km
+  - recovery: roughly MP + 1:00 to MP + 1:30 per km
+  Use comparable effort-based ranges for other distances. Keep paces realistic
+  for the athlete's recent training. Tempo and intervals keep pace targets in
+  their steps only, with top-level pace fields null. Rest and cross sessions
+  must also leave top-level pace fields null.
 
 Return ONLY valid JSON. Do not include markdown, code fences, comments, preamble,
 or explanatory text.
@@ -180,6 +193,8 @@ The JSON must match this schema exactly:
           "description": "string",
           "distance_km": 5.0 or null,
           "duration_min": 45 or null,
+          "pace_low_min_per_km": 6.0 or null,
+          "pace_high_min_per_km": 6.5 or null,
           "steps": [
             {
               "step_type": "warmup | interval | recovery | cooldown",
@@ -197,7 +212,12 @@ The JSON must match this schema exactly:
 }
 
 day_of_week uses 0=Monday through 6=Sunday.
-For rest days, use distance_km=null, duration_min=null, and steps=[].
+pace_low_min_per_km and pace_high_min_per_km are required for easy, long, and
+recovery sessions when steps=[]; they are decimal minutes per kilometre. For
+tempo and intervals, leave top-level pace fields null because pace lives in
+steps. For rest and cross sessions, leave top-level pace fields null.
+For rest days, use distance_km=null, duration_min=null, pace_low_min_per_km=null,
+pace_high_min_per_km=null, and steps=[].
 For target_type="none", target_low and target_high must be null.
 Distances are kilometres. Durations are minutes except WorkoutStep duration_value,
 which follows duration_type: minutes for "time", kilometres for "distance".

@@ -103,6 +103,8 @@ def _scheduled_session_rows(plan_id: str, plan: Plan) -> list[dict[str, Any]]:
                     "description": session.description,
                     "distance_km": session.distance_km,
                     "duration_min": session.duration_min,
+                    "pace_low_min_per_km": session.pace_low_min_per_km,
+                    "pace_high_min_per_km": session.pace_high_min_per_km,
                     "steps": [step.model_dump(mode="json") for step in session.steps],
                 }
             )

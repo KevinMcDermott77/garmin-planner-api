@@ -23,6 +23,8 @@ class Session(BaseModel):
     description: str
     distance_km: float | None = Field(default=None, ge=0)
     duration_min: int | None = Field(default=None, ge=0)
+    pace_low_min_per_km: float | None = None
+    pace_high_min_per_km: float | None = None
     steps: list[WorkoutStep] = Field(default_factory=list)
 
 

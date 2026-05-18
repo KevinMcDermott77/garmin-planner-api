@@ -166,6 +166,8 @@ def test_generate_returns_saved_plan(monkeypatch):
                             "description": "Easy run",
                             "distance_km": 5.0,
                             "duration_min": 30,
+                            "pace_low_min_per_km": 6.15,
+                            "pace_high_min_per_km": 6.45,
                             "steps": [],
                         },
                         {
@@ -174,6 +176,8 @@ def test_generate_returns_saved_plan(monkeypatch):
                             "description": "Rest day",
                             "distance_km": None,
                             "duration_min": None,
+                            "pace_low_min_per_km": None,
+                            "pace_high_min_per_km": None,
                             "steps": [],
                         },
                     ],
@@ -247,6 +251,8 @@ def test_persistence_uses_service_client_and_plain_user_id(monkeypatch):
                             "description": "Easy run",
                             "distance_km": 5.0,
                             "duration_min": 30,
+                            "pace_low_min_per_km": 6.15,
+                            "pace_high_min_per_km": 6.45,
                             "steps": [],
                         }
                     ],
@@ -285,6 +291,8 @@ def test_persistence_uses_service_client_and_plain_user_id(monkeypatch):
     assert fake_supabase.tables["profiles"][0]["user_id"] == "user-123"
     assert fake_supabase.tables["plans"][0]["user_id"] == "user-123"
     assert len(fake_supabase.tables["scheduled_sessions"]) == 1
+    assert fake_supabase.tables["scheduled_sessions"][0]["pace_low_min_per_km"] == 6.15
+    assert fake_supabase.tables["scheduled_sessions"][0]["pace_high_min_per_km"] == 6.45
     assert not hasattr(fake_supabase, "auth")
 
 
