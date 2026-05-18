@@ -20,9 +20,10 @@ MAX_TOKENS = 64000
 MAX_ATTEMPTS = 3
 TEMPERATURE = 0.3
 RETRY_JSON_INSTRUCTION = (
-    "IMPORTANT: The previous attempt produced malformed JSON. Return ONLY a valid, "
-    "complete JSON object matching the Plan schema. No markdown fences, no preamble, "
-    "no truncation. Double-check all commas and brackets.\n\n"
+    "IMPORTANT: The previous attempt produced malformed JSON or failed plan validation. "
+    "Return ONLY a valid, complete JSON object matching the Plan schema. No markdown "
+    "fences, no preamble, no truncation. Double-check all commas, brackets, and race-day "
+    "placement rules.\n\n"
 )
 
 
@@ -66,7 +67,7 @@ def generate_plan(
             print(click_like_retry_message)
             time.sleep(1)
 
-        user_message = base_user_prompt if attempt == 1 else RETRY_JSON_INSTRUCTION + base_user_prompt
+        user_message = base_user_prompt if attempt == 1 else _retry_prompt(final_error, base_user_prompt)
         try:
             response = _create_message(client, user_message)
         except Exception as exc:  # noqa: BLE001
@@ -91,6 +92,12 @@ def generate_plan(
             final_error = PlanGenerationError(
                 f"Claude response contained {len(plan.weeks)} weeks, expected {weeks}."
             )
+            continue
+
+        try:
+            _validate_race_session(plan, race_date, goal_assessment)
+        except PlanGenerationError as exc:
+            final_error = exc
             continue
 
         return plan, tokens
@@ -154,6 +161,25 @@ Programming rules:
   long_run_day, put primary quality on quality_day_primary, use
   quality_day_secondary only when a second quality session is appropriate, and
   avoid days_off for running sessions.
+- RACE DAY OVERRIDES ALL SCHEDULE PREFERENCES. When race_date is supplied,
+  the race MUST be placed on the exact race_date provided as a mandatory
+  session of type "long". It is the goal event and a run: never type "rest",
+  never type "cross", never moved, never converted, and never duplicated onto
+  an adjacent day. Schedule preferences, including days_off, long_run_day, and
+  quality days, do NOT apply to the race date itself. If race_date falls on a
+  normally preferred rest day, that is fine and expected: keep the race there
+  as type "long".
+- The race session must contain the full race distance in distance_km
+  (marathon=42.2, half marathon=21.1, 10k=10.0, 5k=5.0; infer from the goal),
+  a sensible duration_min derived from the goal time, race-strategy text in
+  description, and pace_low_min_per_km/pace_high_min_per_km set to the goal
+  race pace range.
+- The final week must be structured so the race lands exactly on race_date as
+  the type "long" race session. day_of_week uses 0=Monday through 6=Sunday, so
+  the race session's day_of_week MUST equal the weekday of race_date. Taper
+  sessions in the final week still respect schedule preferences, but the race
+  date itself is exempt and mandatory.
+- Post-race day, if it falls within the plan range, may be rest as normal.
 - Fill the rest with easy runs, recovery runs, cross training, or rest.
 - Include at least one rest day every week.
 - Taper in the final 2-3 weeks if a race date is supplied.
@@ -252,6 +278,7 @@ def _user_prompt(
         "- Use athlete_profile.schedule.quality_day_primary for the main tempo/interval workout.\n"
         "- If athlete_profile.schedule.quality_day_secondary is set, use it only for weeks where a second quality session is safe.\n"
         "- Do not schedule running sessions on athlete_profile.schedule.days_off; use rest or cross training instead.\n"
+        "- RACE DAY OVERRIDES ALL SCHEDULE PREFERENCES: if race_date is supplied, place the race on exactly that date as a type \"long\" running session with the full inferred race distance. The race session day_of_week must equal race_date's weekday using 0=Monday through 6=Sunday. Do not move it, rest it, cross-train it, or duplicate it because of days_off or preferred long-run days.\n"
         "- Keep the number of running days compatible with athlete_profile.days_per_week.\n"
         "- Treat earliest_run_time and schedule notes as context for session realism.\n"
         "Return only the JSON plan object.\n\n"
@@ -268,6 +295,99 @@ def _response_text(response: Any) -> str:
     if not text:
         raise PlanGenerationError("Claude returned an empty response.")
     return text
+
+
+def _retry_prompt(final_error: Exception | None, base_user_prompt: str) -> str:
+    detail = f"Previous validation error: {final_error}\n\n" if final_error else ""
+    return RETRY_JSON_INSTRUCTION + detail + base_user_prompt
+
+
+def _validate_race_session(
+    plan: Plan,
+    requested_race_date: date | None,
+    goal_assessment: GoalAssessment | None,
+) -> None:
+    if requested_race_date is None:
+        return
+
+    if plan.race_date != requested_race_date:
+        raise PlanGenerationError(
+            "Race date was supplied, but the generated plan did not preserve "
+            f"race_date={requested_race_date.isoformat()}."
+        )
+
+    race_distance = _race_distance_km(plan.goal, goal_assessment)
+    if race_distance is None:
+        return
+
+    if not plan.weeks:
+        raise PlanGenerationError("Race date was supplied, but the plan contains no weeks.")
+
+    final_week = plan.weeks[-1]
+    race_longs = [
+        session
+        for session in final_week.sessions
+        if session.type == "long" and session.distance_km is not None and abs(session.distance_km - race_distance) <= 0.2
+    ]
+    if len(race_longs) != 1:
+        raise PlanGenerationError(
+            "Race date was supplied, but the final week must contain exactly one "
+            f"type 'long' race session at {race_distance:.1f} km."
+        )
+
+    race_session = race_longs[0]
+    expected_day = requested_race_date.weekday()
+    if race_session.day_of_week != expected_day:
+        raise PlanGenerationError(
+            "Race date was supplied, but the final-week race session has "
+            f"day_of_week={race_session.day_of_week}; race_date "
+            f"{requested_race_date.isoformat()} requires day_of_week={expected_day}."
+        )
+
+    if not _description_mentions_race(race_session.description, plan.goal, goal_assessment):
+        raise PlanGenerationError(
+            "Race date was supplied, but the final-week long race session description "
+            "must clearly identify it as the race."
+        )
+
+
+def _race_distance_km(goal: str, goal_assessment: GoalAssessment | None) -> float | None:
+    detected = goal_assessment.detected_distance if goal_assessment else None
+    if detected == "marathon":
+        return 42.2
+    if detected == "half_marathon":
+        return 21.1
+    if detected == "10k":
+        return 10.0
+    if detected == "5k":
+        return 5.0
+
+    goal_text = goal.lower()
+    if "marathon" in goal_text and "half" not in goal_text:
+        return 42.2
+    if "half marathon" in goal_text or "half-marathon" in goal_text:
+        return 21.1
+    if "10k" in goal_text or "10 k" in goal_text:
+        return 10.0
+    if "5k" in goal_text or "5 k" in goal_text:
+        return 5.0
+    return None
+
+
+def _description_mentions_race(description: str, goal: str, goal_assessment: GoalAssessment | None) -> bool:
+    text = description.lower()
+    if "race" in text:
+        return True
+    detected = goal_assessment.detected_distance if goal_assessment else None
+    if detected == "marathon" or ("marathon" in goal.lower() and "half" not in goal.lower()):
+        return "marathon" in text
+    if detected == "half_marathon" or "half" in goal.lower():
+        return "half" in text
+    if detected == "10k" or "10k" in goal.lower() or "10 k" in goal.lower():
+        return "10k" in text or "10 k" in text
+    if detected == "5k" or "5k" in goal.lower() or "5 k" in goal.lower():
+        return "5k" in text or "5 k" in text
+    return False
 
 
 def _extract_json_object(text: str) -> dict[str, Any]:

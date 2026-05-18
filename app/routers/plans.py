@@ -33,6 +33,11 @@ class PlanGenerateResponse(BaseModel):
     tokens: dict
 
 
+class PlanDeleteResponse(BaseModel):
+    deleted: bool
+    plan_id: str
+
+
 AUTH_RESPONSES = {401: {"description": "Missing or invalid bearer token"}}
 
 
@@ -117,3 +122,17 @@ def get_saved_plan(
     if plan is None:
         raise HTTPException(status_code=404, detail="Plan not found.")
     return plan
+
+
+@router.delete("/{plan_id}", response_model=PlanDeleteResponse, responses={**AUTH_RESPONSES, 404: {"description": "Plan not found"}})
+def delete_saved_plan(
+    plan_id: str,
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> PlanDeleteResponse:
+    try:
+        deleted = persistence.delete_plan(plan_id=plan_id, user_id=str(current_user["sub"]))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Could not delete plan.") from exc
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Plan not found")
+    return PlanDeleteResponse(deleted=True, plan_id=plan_id)

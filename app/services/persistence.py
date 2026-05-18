@@ -25,14 +25,15 @@ def save_profile(profile: AthleteProfile, user_id: str) -> str:
 
 
 def save_plan(
-    profile_id: str,
+    profile_id: str | None,
     user_id: str,
     goal: str,
     weeks: int,
     race_date: date | None,
     plan: Plan,
-    assessment: GoalAssessment,
-    tokens: dict[str, Any],
+    assessment: GoalAssessment | None,
+    tokens: dict[str, Any] | None,
+    status: str = "draft",
 ) -> str:
     """Persist a plan and its scheduled sessions, returning the plan id."""
     plan_payload = {
@@ -41,8 +42,9 @@ def save_plan(
         "goal": goal,
         "weeks": weeks,
         "race_date": race_date.isoformat() if race_date else None,
+        "status": status,
         "plan_json": plan.model_dump(mode="json"),
-        "assessment_json": assessment.model_dump(mode="json"),
+        "assessment_json": assessment.model_dump(mode="json") if assessment else None,
         "tokens_json": tokens,
     }
     response = get_supabase_client().table("plans").insert(plan_payload).execute()
@@ -75,6 +77,12 @@ def get_plan(plan_id: str, user_id: str) -> dict[str, Any] | None:
     )
     plan_row["scheduled_sessions"] = _rows(sessions_response)
     return plan_row
+
+
+def delete_plan(plan_id: str, user_id: str) -> bool:
+    """Delete a plan owned by the user, returning whether a row was removed."""
+    response = get_supabase_client().table("plans").delete().eq("id", plan_id).eq("user_id", user_id).execute()
+    return bool(_rows(response))
 
 
 def list_plans(user_id: str) -> list[dict[str, Any]]:

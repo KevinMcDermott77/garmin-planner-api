@@ -154,6 +154,26 @@ Invoke-RestMethod "http://localhost:8000/api/plans" `
   -Headers @{ Authorization = "Bearer $token" }
 ```
 
+Import a CLI-generated plan for the logged-in user:
+
+`/api/dev/import-plan` is a personal development helper and is only registered
+when `DEV_MODE=true`. It requires the same bearer token as the normal plan
+endpoints. The imported plan is saved as `active` and uses the plan JSON from
+disk as the source of truth.
+
+```powershell
+$planPath = "C:\Dev\garmin-planner\plans\plan_20260515_205043.json"
+$planJson = Get-Content -Raw $planPath | ConvertFrom-Json
+$importBody = @{ plan_json = $planJson } | ConvertTo-Json -Depth 100
+
+$imported = Invoke-RestMethod -Method Post "http://localhost:8000/api/dev/import-plan" `
+  -Headers @{ Authorization = "Bearer $token" } `
+  -ContentType "application/json" `
+  -Body $importBody
+
+$imported.plan_id
+```
+
 ## Tests
 
 ```powershell

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import importlib
+import json
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Any
 
 from fastapi.testclient import TestClient
@@ -42,6 +44,10 @@ class FakeSupabaseQuery:
         self.action = "select"
         return self
 
+    def delete(self) -> "FakeSupabaseQuery":
+        self.action = "delete"
+        return self
+
     def eq(self, key: str, value: Any) -> "FakeSupabaseQuery":
         self.filters.append((key, value))
         return self
@@ -70,6 +76,10 @@ class FakeSupabaseQuery:
         rows = list(self.client.tables.get(self.table_name, []))
         for key, value in self.filters:
             rows = [row for row in rows if row.get(key) == value]
+        if self.action == "delete":
+            existing_rows = self.client.tables.get(self.table_name, [])
+            self.client.tables[self.table_name] = [row for row in existing_rows if row not in rows]
+            return FakeResponse(rows)
         if self.limit_count is not None:
             rows = rows[: self.limit_count]
         return FakeResponse(rows)
@@ -112,6 +122,101 @@ def mock_valid_jwks_auth(monkeypatch):
         return authed_user()
 
     monkeypatch.setattr("app.auth.jwt.decode", fake_decode)
+
+
+class FakeClaudeTextBlock:
+    type = "text"
+
+    def __init__(self, text: str):
+        self.text = text
+
+
+class FakeClaudeUsage:
+    input_tokens = 10
+    output_tokens = 20
+
+
+class FakeClaudeResponse:
+    usage = FakeClaudeUsage()
+
+    def __init__(self, text: str):
+        self.content = [FakeClaudeTextBlock(text)]
+
+
+def test_generator_retries_when_race_day_is_on_wrong_weekday(monkeypatch):
+    from app.services import generator
+
+    bad_plan = {
+        "goal": "sub-4 marathon",
+        "race_date": "2026-10-25",
+        "weeks": [
+            {
+                "week_number": 1,
+                "focus": "Race week",
+                "sessions": [
+                    {
+                        "day_of_week": 5,
+                        "type": "long",
+                        "description": "Marathon race day, but incorrectly one day early",
+                        "distance_km": 42.2,
+                        "duration_min": 239,
+                        "pace_low_min_per_km": 5.6,
+                        "pace_high_min_per_km": 5.8,
+                        "steps": [],
+                    }
+                ],
+            }
+        ],
+    }
+    good_plan = {
+        "goal": "sub-4 marathon",
+        "race_date": "2026-10-25",
+        "weeks": [
+            {
+                "week_number": 1,
+                "focus": "Race week",
+                "sessions": [
+                    {
+                        "day_of_week": 6,
+                        "type": "long",
+                        "description": "Marathon race day with steady goal-pace strategy",
+                        "distance_km": 42.2,
+                        "duration_min": 239,
+                        "pace_low_min_per_km": 5.6,
+                        "pace_high_min_per_km": 5.8,
+                        "steps": [],
+                    }
+                ],
+            }
+        ],
+    }
+    responses = [FakeClaudeResponse(json.dumps(bad_plan)), FakeClaudeResponse(json.dumps(good_plan))]
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr(generator.anthropic, "Anthropic", lambda api_key: object())
+    monkeypatch.setattr(generator.time, "sleep", lambda _seconds: None)
+    prompts: list[str] = []
+
+    def fake_create_message(_client, message):
+        prompts.append(message)
+        return responses.pop(0)
+
+    monkeypatch.setattr(generator, "_create_message", fake_create_message)
+
+    plan, tokens = generator.generate_plan(
+        goal="sub-4 marathon",
+        weeks=1,
+        history_summary=None,
+        race_date=date(2026, 10, 25),
+    )
+
+    race_session = plan.weeks[0].sessions[0]
+    assert race_session.type == "long"
+    assert race_session.distance_km == 42.2
+    assert tokens == {"input": 10, "output": 20, "max": 64000}
+    assert responses == []
+    assert "day_of_week=5" in prompts[1]
+    assert "requires day_of_week=6" in prompts[1]
 
 
 def test_generate_requires_auth(monkeypatch):
