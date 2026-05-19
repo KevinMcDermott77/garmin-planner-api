@@ -197,7 +197,7 @@ def test_generator_retries_when_race_day_is_on_wrong_weekday(monkeypatch):
     monkeypatch.setattr(generator.time, "sleep", lambda _seconds: None)
     prompts: list[str] = []
 
-    def fake_create_message(_client, message):
+    def fake_create_message(_client, message, _system_prompt):
         prompts.append(message)
         return responses.pop(0)
 
@@ -217,6 +217,171 @@ def test_generator_retries_when_race_day_is_on_wrong_weekday(monkeypatch):
     assert responses == []
     assert "day_of_week=5" in prompts[1]
     assert "requires day_of_week=6" in prompts[1]
+
+
+def test_generator_retries_when_schedule_preferences_are_violated(monkeypatch):
+    from app.services import generator
+    from app.services.profile import AthleteProfile
+
+    profile = AthleteProfile.model_validate(
+        {
+            "name": "Test Runner",
+            "weekly_km_recent": 40,
+            "longest_run_km_recent": 21,
+            "easy_pace_min_per_km": 6.0,
+            "days_per_week": 4,
+            "cross_training": None,
+            "schedule": {
+                "long_run_day": "fri",
+                "quality_day_primary": "tue",
+                "days_off": ["mon", "sat"],
+            },
+        }
+    )
+    off_day_plan = {
+        "goal": "sub-4 marathon",
+        "race_date": None,
+        "weeks": [
+            {
+                "week_number": 1,
+                "focus": "Base week",
+                "sessions": [
+                    {
+                        "day_of_week": 0,
+                        "type": "easy",
+                        "description": "Incorrect run on a day off",
+                        "distance_km": 5.0,
+                        "duration_min": 30,
+                        "pace_low_min_per_km": 6.1,
+                        "pace_high_min_per_km": 6.4,
+                        "steps": [],
+                    }
+                ],
+            }
+        ],
+    }
+    cross_plan = {
+        "goal": "sub-4 marathon",
+        "race_date": None,
+        "weeks": [
+            {
+                "week_number": 1,
+                "focus": "Base week",
+                "sessions": [
+                    {
+                        "day_of_week": 0,
+                        "type": "rest",
+                        "description": "Rest day",
+                        "distance_km": None,
+                        "duration_min": None,
+                        "pace_low_min_per_km": None,
+                        "pace_high_min_per_km": None,
+                        "steps": [],
+                    },
+                    {
+                        "day_of_week": 6,
+                        "type": "cross",
+                        "description": "Unrequested cross-training",
+                        "distance_km": None,
+                        "duration_min": 45,
+                        "pace_low_min_per_km": None,
+                        "pace_high_min_per_km": None,
+                        "steps": [],
+                    },
+                ],
+            }
+        ],
+    }
+    good_plan = {
+        "goal": "sub-4 marathon",
+        "race_date": None,
+        "weeks": [
+            {
+                "week_number": 1,
+                "focus": "Base week",
+                "sessions": [
+                    {
+                        "day_of_week": 0,
+                        "type": "rest",
+                        "description": "Rest day",
+                        "distance_km": None,
+                        "duration_min": None,
+                        "pace_low_min_per_km": None,
+                        "pace_high_min_per_km": None,
+                        "steps": [],
+                    },
+                    {
+                        "day_of_week": 1,
+                        "type": "tempo",
+                        "description": "Primary quality session",
+                        "distance_km": 8.0,
+                        "duration_min": 48,
+                        "pace_low_min_per_km": None,
+                        "pace_high_min_per_km": None,
+                        "steps": [],
+                    },
+                    {
+                        "day_of_week": 4,
+                        "type": "long",
+                        "description": "Friday long run",
+                        "distance_km": 16.0,
+                        "duration_min": 100,
+                        "pace_low_min_per_km": 6.2,
+                        "pace_high_min_per_km": 6.6,
+                        "steps": [],
+                    },
+                    {
+                        "day_of_week": 5,
+                        "type": "rest",
+                        "description": "Rest day",
+                        "distance_km": None,
+                        "duration_min": None,
+                        "pace_low_min_per_km": None,
+                        "pace_high_min_per_km": None,
+                        "steps": [],
+                    },
+                ],
+            }
+        ],
+    }
+    responses = [
+        FakeClaudeResponse(json.dumps(off_day_plan)),
+        FakeClaudeResponse(json.dumps(cross_plan)),
+        FakeClaudeResponse(json.dumps(good_plan)),
+    ]
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr(generator.anthropic, "Anthropic", lambda api_key: object())
+    monkeypatch.setattr(generator.time, "sleep", lambda _seconds: None)
+    prompts: list[str] = []
+    system_prompts: list[str] = []
+
+    def fake_create_message(_client, message, system_prompt):
+        prompts.append(message)
+        system_prompts.append(system_prompt)
+        return responses.pop(0)
+
+    monkeypatch.setattr(generator, "_create_message", fake_create_message)
+
+    plan, _tokens = generator.generate_plan(
+        goal="sub-4 marathon",
+        weeks=1,
+        history_summary=None,
+        profile=profile,
+    )
+
+    assert plan.weeks[0].sessions[0].type == "rest"
+    assert responses == []
+    assert "The athlete's days off are: Monday, Saturday" in prompts[0]
+    assert "The long run MUST be placed on Friday" in prompts[0]
+    assert "The primary quality session MUST be on Tuesday" in prompts[0]
+    assert "The plan must contain ZERO sessions of type 'cross'" in prompts[0]
+    assert "The athlete's days off are: Monday, Saturday" in system_prompts[0]
+    assert "The long run MUST be placed on Friday" in system_prompts[0]
+    assert "The primary quality session MUST be on Tuesday" in system_prompts[0]
+    assert "The plan must contain ZERO sessions of type 'cross'" in system_prompts[0]
+    assert "week 1 Monday was generated as type 'easy'" in prompts[1]
+    assert "type 'cross' sessions at: week 1 Sunday" in prompts[2]
 
 
 def test_generate_requires_auth(monkeypatch):

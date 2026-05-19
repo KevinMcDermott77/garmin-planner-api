@@ -23,8 +23,18 @@ RETRY_JSON_INSTRUCTION = (
     "IMPORTANT: The previous attempt produced malformed JSON or failed plan validation. "
     "Return ONLY a valid, complete JSON object matching the Plan schema. No markdown "
     "fences, no preamble, no truncation. Double-check all commas, brackets, and race-day "
-    "placement rules.\n\n"
+    "placement and schedule-preference rules.\n\n"
 )
+DAY_LABELS = {
+    "mon": "Monday",
+    "tue": "Tuesday",
+    "wed": "Wednesday",
+    "thu": "Thursday",
+    "fri": "Friday",
+    "sat": "Saturday",
+    "sun": "Sunday",
+}
+DAY_INDEXES = {day: index for index, day in enumerate(DAY_LABELS)}
 
 
 class PlanGenerationError(Exception):
@@ -69,7 +79,7 @@ def generate_plan(
 
         user_message = base_user_prompt if attempt == 1 else _retry_prompt(final_error, base_user_prompt)
         try:
-            response = _create_message(client, user_message)
+            response = _create_message(client, user_message, _system_prompt(profile, race_date))
         except Exception as exc:  # noqa: BLE001
             raise PlanGenerationError(f"Claude API call failed: {exc}") from exc
 
@@ -96,6 +106,7 @@ def generate_plan(
 
         try:
             _validate_race_session(plan, race_date, goal_assessment)
+            _validate_schedule_preferences(plan, race_date, profile)
         except PlanGenerationError as exc:
             final_error = exc
             continue
@@ -118,12 +129,12 @@ def _print_token_usage(tokens: dict[str, int | str]) -> None:
     print(f"Claude tokens: input={tokens['input']}, output={tokens['output']}, max={tokens['max']}")
 
 
-def _create_message(client: anthropic.Anthropic, user_message: str) -> Any:
+def _create_message(client: anthropic.Anthropic, user_message: str, system_prompt: str) -> Any:
     with client.messages.stream(
         model=MODEL,
         max_tokens=MAX_TOKENS,
         temperature=TEMPERATURE,
-        system=_system_prompt(),
+        system=system_prompt,
         messages=[
             {
                 "role": "user",
@@ -134,8 +145,8 @@ def _create_message(client: anthropic.Anthropic, user_message: str) -> Any:
         return stream.get_final_message()
 
 
-def _system_prompt() -> str:
-    return """
+def _system_prompt(profile: AthleteProfile | None = None, race_date: date | None = None) -> str:
+    prompt = """
 You are an experienced running coach creating a personalised training plan.
 
 Use the provided Garmin history summary as the baseline, including weekly volume,
@@ -248,6 +259,10 @@ For target_type="none", target_low and target_high must be null.
 Distances are kilometres. Durations are minutes except WorkoutStep duration_value,
 which follows duration_type: minutes for "time", kilometres for "distance".
 """.strip()
+    constraints = _schedule_constraints_prompt(profile, race_date)
+    if constraints:
+        prompt += "\n\n" + constraints.strip()
+    return prompt
 
 
 def _user_prompt(
@@ -281,9 +296,66 @@ def _user_prompt(
         "- RACE DAY OVERRIDES ALL SCHEDULE PREFERENCES: if race_date is supplied, place the race on exactly that date as a type \"long\" running session with the full inferred race distance. The race session day_of_week must equal race_date's weekday using 0=Monday through 6=Sunday. Do not move it, rest it, cross-train it, or duplicate it because of days_off or preferred long-run days.\n"
         "- Keep the number of running days compatible with athlete_profile.days_per_week.\n"
         "- Treat earliest_run_time and schedule notes as context for session realism.\n"
+        f"{_schedule_constraints_prompt(profile, race_date)}"
         "Return only the JSON plan object.\n\n"
         f"{json.dumps(payload, indent=2, ensure_ascii=False)}"
     )
+
+
+def _schedule_constraints_prompt(profile: AthleteProfile | None, race_date: date | None) -> str:
+    if profile is None:
+        return ""
+
+    schedule = profile.schedule
+    lines = ["Concrete schedule constraints for this exact athlete:"]
+    if schedule.days_off:
+        days_off = ", ".join(_day_label(day) for day in schedule.days_off)
+        rest_rules = " and ".join(f"every {_day_label(day)}" for day in schedule.days_off)
+        lines.append(
+            f"- The athlete's days off are: {days_off}. {rest_rules} in EVERY week "
+            "MUST be type 'rest'. No exceptions, including recovery weeks and race week, "
+            "except the race date itself which overrides this rule per the race-day rule. "
+            "Never schedule any running, quality, long, easy, recovery, or cross session "
+            "on these days_off days."
+        )
+    else:
+        lines.append("- The athlete did not list any days_off.")
+
+    lines.append(
+        f"- The long run MUST be placed on {_day_label(schedule.long_run_day)} "
+        "every week it occurs, except the race date itself if race_date requires a different day."
+    )
+    lines.append(
+        f"- The primary quality session MUST be on {_day_label(schedule.quality_day_primary)}."
+    )
+    if schedule.quality_day_secondary:
+        lines.append(
+            f"- Use the secondary quality day, {_day_label(schedule.quality_day_secondary)}, "
+            "only when a second quality session is safe and appropriate."
+        )
+
+    if _cross_training_allowed(profile):
+        lines.append(
+            f"- Cross-training is explicitly allowed because profile.cross_training is: {profile.cross_training}."
+        )
+    else:
+        lines.append(
+            "- profile.cross_training is empty/null. Do NOT introduce cross-training. "
+            "The plan must contain ZERO sessions of type 'cross'."
+        )
+
+    lines.append(
+        f"- Honour days_per_week={profile.days_per_week}: each week should contain exactly "
+        f"{profile.days_per_week} non-rest running days when feasible, and MUST NOT exceed "
+        f"{profile.days_per_week} running days. Count only easy, long, tempo, intervals, "
+        "and recovery as running days; rest and cross are not running days."
+    )
+    if race_date is not None:
+        lines.append(
+            f"- race_date={race_date.isoformat()} falls on {_day_label_from_index(race_date.weekday())}; "
+            "this single date still overrides all schedule preferences as already specified."
+        )
+    return "\n".join(lines) + "\n"
 
 
 def _response_text(response: Any) -> str:
@@ -349,6 +421,66 @@ def _validate_race_session(
             "Race date was supplied, but the final-week long race session description "
             "must clearly identify it as the race."
         )
+
+
+def _validate_schedule_preferences(
+    plan: Plan,
+    requested_race_date: date | None,
+    profile: AthleteProfile | None,
+) -> None:
+    if profile is None:
+        return
+
+    days_off = {DAY_INDEXES[day] for day in profile.schedule.days_off}
+    race_day = requested_race_date.weekday() if requested_race_date is not None else None
+    final_week_number = plan.weeks[-1].week_number if plan.weeks else None
+    for week in plan.weeks:
+        for session in week.sessions:
+            if session.day_of_week not in days_off:
+                continue
+            if (
+                requested_race_date is not None
+                and week.week_number == final_week_number
+                and session.day_of_week == race_day
+            ):
+                continue
+            if session.type != "rest":
+                raise PlanGenerationError(
+                    "Schedule preferences require days_off to be rest, but "
+                    f"week {week.week_number} {_day_label_from_index(session.day_of_week)} "
+                    f"was generated as type '{session.type}'."
+                )
+
+    if _cross_training_allowed(profile):
+        return
+
+    cross_sessions = [
+        f"week {week.week_number} {_day_label_from_index(session.day_of_week)}"
+        for week in plan.weeks
+        for session in week.sessions
+        if session.type == "cross"
+    ]
+    if cross_sessions:
+        locations = ", ".join(cross_sessions)
+        raise PlanGenerationError(
+            "profile.cross_training is empty/null, but the generated plan contains "
+            f"type 'cross' sessions at: {locations}."
+        )
+
+
+def _cross_training_allowed(profile: AthleteProfile) -> bool:
+    return bool(profile.cross_training and profile.cross_training.strip())
+
+
+def _day_label(day: str) -> str:
+    return DAY_LABELS.get(day, day)
+
+
+def _day_label_from_index(day_index: int) -> str:
+    for day, index in DAY_INDEXES.items():
+        if index == day_index:
+            return DAY_LABELS[day]
+    return f"day_of_week={day_index}"
 
 
 def _race_distance_km(goal: str, goal_assessment: GoalAssessment | None) -> float | None:
