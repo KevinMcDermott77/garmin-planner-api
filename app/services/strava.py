@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from statistics import median
 from typing import Any
 from urllib.parse import urlencode
@@ -214,6 +214,78 @@ def compute_fitness_summary(user_id: str) -> dict[str, Any] | None:
     }
 
 
+def get_activity_matches(user_id: str, plan: dict[str, Any], today: date) -> dict[str, dict[str, Any]]:
+    """Match past planned running sessions to Strava runs without storing results."""
+    race_date_value = plan.get("race_date")
+    if not race_date_value:
+        return {}
+
+    access_token = get_valid_token(user_id)
+    if not access_token:
+        return {}
+
+    try:
+        race_date = date.fromisoformat(str(race_date_value))
+        plan_weeks = _plan_week_count(plan)
+    except (TypeError, ValueError):
+        return {}
+
+    start_date = race_date - timedelta(days=plan_weeks * 7)
+    runs = _fetch_runs_between(access_token, start_date, today)
+    matches: dict[str, dict[str, Any]] = {}
+    used_activity_ids: set[Any] = set()
+
+    for week in plan.get("weeks", []):
+        week_number = int(week.get("week_number") or 0)
+        if week_number <= 0:
+            continue
+
+        for session in week.get("sessions", []):
+            session_type = session.get("type")
+            if session_type in {"rest", "cross"}:
+                continue
+
+            day_of_week = int(session.get("day_of_week") or 0)
+            session_date = start_date + timedelta(days=(week_number - 1) * 7 + day_of_week)
+            if session_date >= today:
+                continue
+
+            key = f"week_{week_number}_day_{day_of_week}"
+            planned_distance_km = _optional_float(session.get("distance_km"))
+            match = _best_activity_for_session(runs, session_date, planned_distance_km, used_activity_ids)
+            if match is None:
+                matches[key] = _missed_match()
+                continue
+            used_activity_ids.add(match.get("id"))
+
+            actual_distance_km = round(float(match.get("distance") or 0) / 1000, 2)
+            matches[key] = {
+                "status": _match_status(actual_distance_km, planned_distance_km),
+                "actual_distance_km": actual_distance_km,
+                "actual_pace_min_per_km": _rounded_pace(match.get("average_speed")),
+                "actual_duration_min": round(float(match.get("moving_time") or 0) / 60, 1)
+                if match.get("moving_time") is not None
+                else None,
+                "strava_activity_id": match.get("id"),
+                "strava_activity_name": match.get("name"),
+            }
+
+    return matches
+
+
+def compute_plan_start_date(plan: dict[str, Any]) -> date | None:
+    """Compute a plan start date from race_date and plan length."""
+    race_date_value = plan.get("race_date")
+    if not race_date_value:
+        return None
+    try:
+        race_date = date.fromisoformat(str(race_date_value))
+        plan_weeks = _plan_week_count(plan)
+    except (TypeError, ValueError):
+        return None
+    return race_date - timedelta(days=plan_weeks * 7)
+
+
 def get_token_row(user_id: str) -> dict[str, Any] | None:
     """Return a stored Strava token row for the user, if present."""
     response = (
@@ -274,6 +346,93 @@ def _speed_to_min_per_km(metres_per_second: float) -> float | None:
     if metres_per_second <= 0:
         return None
     return (1000 / metres_per_second) / 60
+
+
+def _fetch_runs_between(access_token: str, start_date: date, today: date) -> list[dict[str, Any]]:
+    try:
+        response = httpx.get(
+            STRAVA_ACTIVITIES_URL,
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={
+                "after": int(datetime.combine(start_date, time.min, tzinfo=UTC).timestamp()),
+                "before": int(datetime.combine(today, time.min, tzinfo=UTC).timestamp()),
+                "per_page": 100,
+                "type": "Run",
+            },
+            timeout=15,
+        )
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise StravaFetchError("Could not fetch Strava data") from exc
+    return [activity for activity in response.json() if activity.get("type") == "Run"]
+
+
+def _best_activity_for_session(
+    runs: list[dict[str, Any]],
+    session_date: date,
+    planned_distance_km: float | None,
+    used_activity_ids: set[Any],
+) -> dict[str, Any] | None:
+    candidates = [
+        run
+        for run in runs
+        if run.get("id") not in used_activity_ids
+        and run.get("start_date")
+        and abs((_parse_datetime(str(run["start_date"])).date() - session_date).days) <= 1
+    ]
+    if not candidates:
+        return None
+
+    if planned_distance_km is None:
+        return min(candidates, key=lambda run: abs((_parse_datetime(str(run["start_date"])).date() - session_date).days))
+
+    return min(candidates, key=lambda run: abs(float(run.get("distance") or 0) / 1000 - planned_distance_km))
+
+
+def _match_status(actual_distance_km: float, planned_distance_km: float | None) -> str:
+    if planned_distance_km is None or planned_distance_km <= 0:
+        return "completed"
+    if actual_distance_km >= planned_distance_km * 0.9:
+        return "completed"
+    if actual_distance_km >= planned_distance_km * 0.5:
+        return "partial"
+    return "partial"
+
+
+def _missed_match() -> dict[str, Any]:
+    return {
+        "status": "missed",
+        "actual_distance_km": None,
+        "actual_pace_min_per_km": None,
+        "actual_duration_min": None,
+        "strava_activity_id": None,
+        "strava_activity_name": None,
+    }
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _rounded_pace(value: Any) -> float | None:
+    try:
+        speed = float(value or 0)
+    except (TypeError, ValueError):
+        return None
+    pace = _speed_to_min_per_km(speed)
+    return round(pace, 2) if pace is not None else None
+
+
+def _plan_week_count(plan: dict[str, Any]) -> int:
+    weeks_value = plan.get("weeks")
+    if isinstance(weeks_value, list):
+        return len(weeks_value)
+    return int(weeks_value)
 
 
 def _expires_at_to_datetime(value: Any) -> datetime:

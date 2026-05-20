@@ -10,6 +10,7 @@ from app.auth import get_current_user
 from app.services.generator import PlanGenerationError, generate_plan
 from app.services.models import Plan
 from app.services import persistence
+from app.services import strava
 from app.services.profile import AthleteProfile
 from app.services.sanity_check import GoalAssessment, assess_goal
 
@@ -122,6 +123,40 @@ def get_saved_plan(
     if plan is None:
         raise HTTPException(status_code=404, detail="Plan not found.")
     return plan
+
+
+@router.get("/{plan_id}/matches", responses={**AUTH_RESPONSES, 404: {"description": "Plan not found"}})
+def get_plan_matches(
+    plan_id: str,
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    user_id = str(current_user["sub"])
+    try:
+        plan_row = persistence.get_plan(plan_id, user_id=user_id)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Could not retrieve plan: {exc}") from exc
+    if plan_row is None:
+        raise HTTPException(status_code=404, detail="Plan not found.")
+
+    plan_json = plan_row.get("plan_json") or {}
+    start_date = strava.compute_plan_start_date(plan_json)
+    strava_connected = strava.get_token_row(user_id) is not None
+
+    try:
+        matches = strava.get_activity_matches(user_id, plan_json, date.today())
+    except strava.StravaFetchError:
+        return {
+            "matches": {},
+            "start_date": None,
+            "strava_connected": True,
+            "error": "Could not fetch Strava data",
+        }
+
+    return {
+        "matches": matches,
+        "start_date": start_date.isoformat() if start_date else None,
+        "strava_connected": strava_connected,
+    }
 
 
 @router.delete("/{plan_id}", response_model=PlanDeleteResponse, responses={**AUTH_RESPONSES, 404: {"description": "Plan not found"}})
