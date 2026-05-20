@@ -28,10 +28,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-from app.routers import plans, race  # noqa: E402
+from app.routers import plans, race, strava  # noqa: E402
 
 app.include_router(plans.router, prefix="/api/plans", tags=["plans"])
 app.include_router(race.router, prefix="/api/race", tags=["race"])
+app.include_router(strava.router, prefix="/api/strava", tags=["strava"])
 
 if os.getenv("DEV_MODE", "").lower() == "true":
     from app.routers import dev  # noqa: E402

@@ -22,6 +22,10 @@ SUPABASE_URL
 SUPABASE_SERVICE_KEY
 DATABASE_URL
 DEV_MODE
+STRAVA_CLIENT_ID
+STRAVA_CLIENT_SECRET
+STRAVA_REDIRECT_URI
+STRAVA_TOKEN_ENCRYPTION_KEY
 ```
 
 Optional legacy auth variable:
@@ -40,6 +44,20 @@ JWT verification supports both Supabase signing modes:
 Leave `SUPABASE_JWT_SECRET` empty unless your project still uses legacy HS256
 tokens.
 
+Generate the Strava token encryption key before using Strava features:
+
+```powershell
+.\.venv\Scripts\python.exe -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+Set `STRAVA_TOKEN_ENCRYPTION_KEY` in `.env` to that generated value. For local
+Strava OAuth, `STRAVA_REDIRECT_URI` must exactly match the callback URL
+registered in your Strava API application, for example:
+
+```powershell
+STRAVA_REDIRECT_URI=http://localhost:8000/api/strava/callback
+```
+
 Before first run, open the Supabase SQL editor and run:
 
 ```powershell
@@ -54,6 +72,14 @@ Get-Content .\migrations\002_add_user_id.sql
 
 Paste each SQL file into Supabase and execute it. The app does not run
 migrations programmatically.
+
+Before using Strava features, also run:
+
+```powershell
+Get-Content .\migrations\005_strava_tokens.sql
+```
+
+Paste the SQL into Supabase and execute it manually.
 
 `migrations/003_rls_placeholder.sql` is comments only. It documents the
 production RLS policies to apply before real users, but it is not meant to be
