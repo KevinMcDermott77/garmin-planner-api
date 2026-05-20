@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from datetime import date
 from typing import Any
@@ -79,7 +80,7 @@ def generate_plan(
 
         user_message = base_user_prompt if attempt == 1 else _retry_prompt(final_error, base_user_prompt)
         try:
-            response = _create_message(client, user_message, _system_prompt(profile, race_date))
+            response = _create_message(client, user_message, _system_prompt(goal, weeks, profile, race_date, goal_assessment))
         except Exception as exc:  # noqa: BLE001
             raise PlanGenerationError(f"Claude API call failed: {exc}") from exc
 
@@ -145,7 +146,14 @@ def _create_message(client: anthropic.Anthropic, user_message: str, system_promp
         return stream.get_final_message()
 
 
-def _system_prompt(profile: AthleteProfile | None = None, race_date: date | None = None) -> str:
+def _system_prompt(
+    goal: str,
+    weeks: int,
+    profile: AthleteProfile | None = None,
+    race_date: date | None = None,
+    goal_assessment: GoalAssessment | None = None,
+) -> str:
+    coaching_principles = _coaching_principles_prompt(goal, weeks, profile, goal_assessment)
     prompt = """
 You are an experienced running coach creating a personalised training plan.
 
@@ -155,23 +163,11 @@ pace distribution, HR zones, recent long runs, rest pattern, and weekly progress
 Programming rules:
 - The plan must be specific to the goal distance and target time. Do not produce a
   generic beginner plan unless the goal assessment says that is the safest outcome.
-- If a goal assessment is provided, use required_peak_weekly_km as the intended
-  peak volume for feasible goals. Peak week distance should land within about 10%
-  of that number, unless injury context or very low confidence makes that unsafe.
 - If the goal is low-confidence or infeasible but the user confirmed it anyway,
-  build the safest possible bridge plan toward the required peak volume and avoid
-  pretending the target is guaranteed.
+  build the safest possible bridge plan and avoid pretending the target is guaranteed.
 - Start from Garmin history as ground truth when present. Athlete interview answers
   are context, especially when Garmin history is missing or incomplete.
-- Apply progressive overload. Do not increase weekly volume by more than about 10%
-  except when the athlete's recent pattern clearly supports it.
-- Cut back volume every 3-4 weeks to absorb training.
-- Include exactly one long run most weeks.
-- Include one quality session most weeks, either tempo or intervals.
-- Respect athlete_profile.schedule when present: put the long run on
-  long_run_day, put primary quality on quality_day_primary, use
-  quality_day_secondary only when a second quality session is appropriate, and
-  avoid days_off for running sessions.
+{coaching_principles}
 - RACE DAY OVERRIDES ALL SCHEDULE PREFERENCES. When race_date is supplied,
   the race MUST be placed on the exact race_date provided as a mandatory
   session of type "long". It is the goal event and a run: never type "rest",
@@ -193,10 +189,7 @@ Programming rules:
 - Post-race day, if it falls within the plan range, may be rest as normal.
 - Fill the rest with easy runs, recovery runs, cross training, or rest.
 - Include at least one rest day every week.
-- Taper in the final 2-3 weeks if a race date is supplied.
 - Keep sessions realistic for the athlete's recent volume and longest run.
-- For marathon goals, build long runs and weekly volume enough to support the
-  target, using the required_peak_weekly_km value as a hard planning anchor.
 - Use steps for structured workouts when useful, especially intervals and tempo work.
 - Every unstructured running session must include a concrete target pace range.
   For easy, long, and recovery sessions with distance_km set and steps=[],
@@ -258,7 +251,7 @@ pace_high_min_per_km=null, and steps=[].
 For target_type="none", target_low and target_high must be null.
 Distances are kilometres. Durations are minutes except WorkoutStep duration_value,
 which follows duration_type: minutes for "time", kilometres for "distance".
-""".strip()
+""".replace("{coaching_principles}", coaching_principles).strip()
     constraints = _schedule_constraints_prompt(profile, race_date)
     if constraints:
         prompt += "\n\n" + constraints.strip()
@@ -283,11 +276,13 @@ def _user_prompt(
         "goal_assessment": goal_assessment.model_dump(mode="json") if goal_assessment else None,
         "history_summary": history_summary,
     }
+    coaching_principles = _coaching_principles_prompt(goal, weeks, profile, goal_assessment)
     return (
         "Create a personalised running plan from this request, athlete profile, "
         "goal assessment, and Garmin history if present.\n"
         "Treat Garmin history as ground truth. Treat athlete profile answers as context.\n"
-        "Respect required_peak_weekly_km in the goal assessment when feasible.\n"
+        "Use this concrete coaching calibration for this exact request:\n"
+        f"{coaching_principles}\n"
         "Schedule preferences:\n"
         "- Use athlete_profile.schedule.long_run_day for the weekly long run whenever possible.\n"
         "- Use athlete_profile.schedule.quality_day_primary for the main tempo/interval workout.\n"
@@ -300,6 +295,158 @@ def _user_prompt(
         "Return only the JSON plan object.\n\n"
         f"{json.dumps(payload, indent=2, ensure_ascii=False)}"
     )
+
+
+def _coaching_principles_prompt(
+    goal: str,
+    weeks: int,
+    profile: AthleteProfile | None,
+    goal_assessment: GoalAssessment | None,
+) -> str:
+    days_per_week = profile.days_per_week if profile else 4
+    weekly_km_recent = profile.weekly_km_recent if profile else 40.0
+    longest_run_km_recent = profile.longest_run_km_recent if profile else 16.0
+    phase_text = _phase_boundaries_prompt(weeks)
+    peak_weekly_km = min(weekly_km_recent * 1.3, 65)
+    absolute_max_km = 65 if days_per_week <= 4 else 75
+    peak_long_run_km = min(32, weekly_km_recent * 0.8)
+    race_sim_week = max(1, weeks - 3)
+    pace_text = _pace_guidance_prompt(goal, goal_assessment)
+
+    return f"""1. Session structure per week (non-taper weeks):
+- For a 4-day/week plan:
+  - Day 1 of running week: INTERVALS (short repeats, speed work -- the hardest session).
+  - Day 2 of running week: EASY run (recovery from intervals).
+  - Day 3 of running week: TEMPO or marathon-pace work (second quality session).
+  - Day 4 of running week: LONG run (at easy pace, with marathon-pace finish in later weeks).
+  - Rest days fill the remaining 3 days of the week per the athlete's schedule preferences.
+- For a 5-day/week plan, add one more EASY run between tempo and long run.
+- For a 3-day/week plan: one quality session (alternating intervals/tempo), one easy, one long.
+- Every non-cutback, non-taper week MUST follow the pattern: quality1 -> easy -> quality2 -> long, with rest days placed per schedule preferences. Never place two quality sessions on consecutive days.
+- This athlete requested days_per_week={days_per_week}. Keep every week compatible with that running-day count and the schedule constraints below.
+
+2. Quality session progression:
+{phase_text}
+- Phase 1: Base -- short intervals (400m-800m repeats), easy tempos. Volume building.
+- Phase 2: Development -- mile repeats, threshold work, tempo runs 20-30 min.
+- Phase 3: Specific -- marathon-pace tempo runs 30-40 min, cruise intervals, long runs with MP finish sections.
+- Phase 4: Peak -- progressive long runs, race-simulation tempo, under-and-overs (alternating slightly above and below MP).
+- Final 3 weeks: Taper -- reduce volume, maintain intensity. Short quality sessions.
+- Race week: shakeouts only.
+
+3. Volume calibration:
+- Peak weekly km MUST NOT exceed {peak_weekly_km:.1f}km. Compute as min(weekly_km_recent * 1.3, 65). For a {days_per_week}-day/week plan, the absolute maximum is {absolute_max_km}km/week.
+- The total weekly volume (sum of ALL sessions including easy runs) MUST NOT exceed {peak_weekly_km:.1f}km in any week. This is a hard cap, not a guideline.
+- A runner doing 40km/week should peak at about 52km, not 75km. Do not use weekly_km_recent * 1.8 or higher.
+- Apply progressive overload. Do not increase weekly volume by more than about 10% except when the athlete's recent pattern clearly supports it.
+- Cutback weeks drop to 60% of the preceding block's peak volume, not 80%. Place cutback weeks every 3-4 weeks to absorb training.
+
+4. Long run progression:
+- Weeks 1-4: long run = longest_run_km_recent * 0.8 to 1.0. With longest_run_km_recent={longest_run_km_recent:.1f}km, start long runs around {longest_run_km_recent * 0.8:.1f}-{longest_run_km_recent:.1f}km and do not start above current longest.
+- Build long runs by max 2km per week.
+- Peak long run: min(32, weekly_km_recent * 0.8) = {peak_long_run_km:.1f}km. For a 40km/week runner, peak long run is about 32km max.
+- Race simulation week is week {race_sim_week}: replace the long run with "Half Marathon Race Practice -- 21km at goal marathon pace, treat as a dress rehearsal. This is NOT a rest week."
+- Taper long run progression: 18km -> 13km -> race.
+
+5. Pace guidance:
+{pace_text}"""
+
+
+def _phase_boundaries_prompt(weeks: int) -> str:
+    phase1_end = max(1, int(weeks * 0.25))
+    phase2_end = max(phase1_end + 1, int(weeks * 0.5))
+    phase3_end = max(phase2_end + 1, int(weeks * 0.75))
+    phase4_end = max(phase3_end, weeks - 3)
+    final_start = max(1, weeks - 2)
+    lines = [
+        f"- Phase 1 is weeks 1-{phase1_end}.",
+        f"- Phase 2 is weeks {phase1_end + 1}-{phase2_end}.",
+        f"- Phase 3 is weeks {phase2_end + 1}-{phase3_end}.",
+    ]
+    if phase3_end + 1 <= phase4_end:
+        lines.append(f"- Phase 4 is weeks {phase3_end + 1}-{phase4_end}.")
+    else:
+        lines.append("- Phase 4 is absorbed into the peak/taper transition because this is a short plan.")
+    lines.append(f"- Final 3 weeks are weeks {final_start}-{weeks}.")
+    lines.append(f"- Race week is week {weeks}.")
+    return "\n".join(lines)
+
+
+def _pace_guidance_prompt(goal: str, goal_assessment: GoalAssessment | None) -> str:
+    goal_minutes = _goal_minutes(goal, goal_assessment)
+    distance_km = _race_distance_km(goal, goal_assessment)
+    if goal_minutes is None or distance_km is None:
+        return (
+            "- No exact target time was detected. Use athlete easy pace, recent history, "
+            "and goal distance to set realistic easy, long, tempo, interval, and recovery paces."
+        )
+
+    mp = goal_minutes / distance_km
+    easy_low = mp + 60 / 60
+    easy_high = mp + 75 / 60
+    long_low = mp + 45 / 60
+    long_high = mp + 60 / 60
+    tempo_low = mp - 15 / 60
+    tempo_high = mp + 15 / 60
+    interval_low = mp - 45 / 60
+    interval_high = mp - 30 / 60
+    recovery = mp + 90 / 60
+    return (
+        f'- For "{goal}" (goal {goal_minutes:.0f} min): '
+        f"MP={_format_pace_value(mp)}/km, "
+        f"easy={_format_pace_value(easy_low)}-{_format_pace_value(easy_high)}/km, "
+        f"long={_format_pace_value(long_low)}-{_format_pace_value(long_high)}/km, "
+        f"tempo={_format_pace_value(tempo_low)}-{_format_pace_value(tempo_high)}/km, "
+        f"intervals={_format_pace_value(interval_low)}-{_format_pace_value(interval_high)}/km, "
+        f"recovery={_format_pace_value(recovery)}/km+."
+    )
+
+
+def _goal_minutes(goal: str, goal_assessment: GoalAssessment | None) -> float | None:
+    if goal_assessment and goal_assessment.detected_target_minutes is not None:
+        return float(goal_assessment.detected_target_minutes)
+    distance = _distance_name(goal, goal_assessment)
+    return _parse_target_time(goal.lower(), distance)
+
+
+def _distance_name(goal: str, goal_assessment: GoalAssessment | None) -> str:
+    detected = goal_assessment.detected_distance if goal_assessment else None
+    if detected:
+        return detected
+    text = goal.lower()
+    if "marathon" in text and "half" not in text:
+        return "marathon"
+    if "half marathon" in text or re.search(r"\bhalf\b", text):
+        return "half_marathon"
+    if re.search(r"\b10\s?k\b", text):
+        return "10k"
+    if re.search(r"\b5\s?k\b", text):
+        return "5k"
+    return "unknown"
+
+
+def _parse_target_time(text: str, distance: str) -> float | None:
+    match = re.search(r"\bsub[-\s]*(\d+)(?::(\d{1,2}))?(?::(\d{1,2}))?\b", text)
+    if not match:
+        return None
+    first = int(match.group(1))
+    second = int(match.group(2)) if match.group(2) is not None else None
+    third = int(match.group(3)) if match.group(3) is not None else None
+    if third is not None and second is not None:
+        return first * 60 + second + third / 60
+    if second is not None:
+        if first <= 5:
+            return first * 60 + second
+        return first + second / 60
+    if distance in ("marathon", "half_marathon") and first <= 12:
+        return float(first * 60)
+    return float(first)
+
+
+def _format_pace_value(value: float) -> str:
+    total_seconds = int(round(value * 60))
+    minutes, seconds = divmod(total_seconds, 60)
+    return f"{minutes}:{seconds:02d}"
 
 
 def _schedule_constraints_prompt(profile: AthleteProfile | None, race_date: date | None) -> str:

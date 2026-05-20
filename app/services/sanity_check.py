@@ -48,7 +48,7 @@ def assess_goal(
     detected_distance, detected_target_minutes = _parse_goal(goal)
     current_weekly_km = _current_weekly_km(profile, history_summary)
     predicted_minutes = _predict_minutes(profile, detected_distance)
-    required_peak = _required_peak_km(detected_distance, detected_target_minutes)
+    required_peak = _required_peak_km(detected_distance, detected_target_minutes, current_weekly_km)
     weeks_to_close_gap = _weeks_to_close_gap(current_weekly_km, required_peak)
 
     feasible, confidence = _feasibility(
@@ -161,20 +161,13 @@ def _predict_minutes(profile: AthleteProfile, distance: GoalDistance) -> float |
     return race_pace * target_distance
 
 
-def _required_peak_km(distance: GoalDistance, target_minutes: float | None) -> float:
-    target = target_minutes if target_minutes is not None else float("inf")
-    table = {
-        "marathon": MARATHON_PEAKS,
-        "half_marathon": HALF_PEAKS,
-        "10k": TEN_K_PEAKS,
-        "5k": FIVE_K_PEAKS,
-    }.get(distance)
-    if table is None:
-        return 30.0
-    for upper, peak in table:
-        if target <= upper:
-            return float(peak)
-    return float(table[-1][1])
+def _required_peak_km(
+    distance: GoalDistance,
+    target_minutes: float | None,
+    current_weekly_km: float,
+) -> float:
+    _ = (distance, target_minutes)
+    return min(current_weekly_km * 1.3, 65)
 
 
 def _weeks_to_close_gap(current: float, required: float) -> int | None:
