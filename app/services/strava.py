@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from statistics import median
 from typing import Any
 from urllib.parse import urlencode
 
@@ -20,6 +21,10 @@ STRAVA_SCOPE = "activity:read_all"
 
 class StravaConfigError(RuntimeError):
     """Raised when Strava configuration is incomplete."""
+
+
+class StravaFetchError(RuntimeError):
+    """Raised when Strava data cannot be fetched for a connected user."""
 
 
 def get_strava_auth_url(user_id: str) -> str:
@@ -149,6 +154,66 @@ def get_recent_activities(user_id: str, per_page: int = 20) -> list[dict[str, An
     return [_activity_to_run(activity) for activity in response.json() if activity.get("type") == "Run"]
 
 
+def compute_fitness_summary(user_id: str) -> dict[str, Any] | None:
+    """Compute generation-time fitness inputs from the user's last 90 days of Strava runs."""
+    if get_token_row(user_id) is None:
+        return None
+
+    access_token = get_valid_token(user_id)
+    if not access_token:
+        raise StravaFetchError("Could not fetch Strava data")
+
+    after = int((datetime.now(UTC) - timedelta(days=90)).timestamp())
+    try:
+        response = httpx.get(
+            STRAVA_ACTIVITIES_URL,
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={"after": after, "per_page": 100, "type": "Run"},
+            timeout=15,
+        )
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise StravaFetchError("Could not fetch Strava data") from exc
+
+    runs = [activity for activity in response.json() if activity.get("type") == "Run"]
+    if not runs:
+        return None
+
+    distances_km = [float(run.get("distance") or 0) / 1000 for run in runs]
+    total_km = sum(distances_km)
+    longest_run_km = max(distances_km)
+    run_dates = [_parse_datetime(str(run["start_date"])) for run in runs if run.get("start_date")]
+    run_days = {run_date.date().isoformat() for run_date in run_dates}
+
+    short_run_paces = [
+        _speed_to_min_per_km(float(run.get("average_speed") or 0))
+        for run in runs
+        if float(run.get("distance") or 0) / 1000 < 10
+    ]
+    all_run_paces = [_speed_to_min_per_km(float(run.get("average_speed") or 0)) for run in runs]
+    pace_candidates = [pace for pace in short_run_paces if pace is not None] or [
+        pace for pace in all_run_paces if pace is not None
+    ]
+
+    # Simple 90-day approximation: divide by 13 weeks. This intentionally does
+    # not try to infer injury gaps or pre-Strava history from sparse activity.
+    days_per_week = round(len(run_days) / 13.0)
+    days_per_week = min(7, max(3, days_per_week))
+
+    return {
+        "weekly_km_recent": round(total_km / 13.0, 1),
+        "longest_run_km_recent": round(longest_run_km, 1),
+        "easy_pace_min_per_km": round(median(pace_candidates), 2) if pace_candidates else None,
+        "days_per_week": days_per_week,
+        "run_count": len(runs),
+        "date_range": {
+            "from": min(run_dates).date().isoformat() if run_dates else None,
+            "to": max(run_dates).date().isoformat() if run_dates else None,
+        },
+        "data_source": "strava_90_days",
+    }
+
+
 def get_token_row(user_id: str) -> dict[str, Any] | None:
     """Return a stored Strava token row for the user, if present."""
     response = (
@@ -203,6 +268,12 @@ def _format_pace(metres_per_second: float) -> str | None:
     seconds_per_km = round(1000 / metres_per_second)
     minutes, seconds = divmod(seconds_per_km, 60)
     return f"{minutes}:{seconds:02d}"
+
+
+def _speed_to_min_per_km(metres_per_second: float) -> float | None:
+    if metres_per_second <= 0:
+        return None
+    return (1000 / metres_per_second) / 60
 
 
 def _expires_at_to_datetime(value: Any) -> datetime:

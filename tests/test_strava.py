@@ -258,3 +258,130 @@ def test_auth_requirements(monkeypatch):
     assert activities_response.status_code == 401
     assert status_response.status_code == 401
     assert callback_response.status_code == 307
+
+
+def test_fitness_summary_returns_disconnected_when_no_token(monkeypatch):
+    mock_auth(monkeypatch)
+    monkeypatch.setattr("app.routers.strava.strava.get_token_row", lambda user_id: None)
+    client = make_client(monkeypatch)
+
+    response = client.get("/api/strava/fitness-summary", headers={"Authorization": "Bearer valid-token"})
+
+    assert response.status_code == 200
+    assert response.json() == {"connected": False, "summary": None}
+
+
+def test_fitness_summary_returns_computed_summary(monkeypatch):
+    mock_auth(monkeypatch)
+    set_strava_env(monkeypatch)
+    from app.services import strava
+
+    user_id = "00000000-0000-0000-0000-000000000001"
+    fake_supabase = FakeSupabaseClient(
+        tables={
+            "strava_tokens": [
+                {
+                    "user_id": user_id,
+                    "access_token": strava._encrypt("valid-access"),
+                    "refresh_token": strava._encrypt("refresh"),
+                    "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+                    "athlete_id": 99,
+                    "scope": "activity:read_all",
+                }
+            ]
+        }
+    )
+    monkeypatch.setattr("app.services.strava.get_supabase_client", lambda: fake_supabase)
+
+    class FakeHttpxResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> list[dict[str, Any]]:
+            return [
+                {
+                    "id": 1,
+                    "type": "Run",
+                    "start_date": "2026-03-01T08:00:00Z",
+                    "distance": 5000,
+                    "average_speed": 2.7777777778,
+                },
+                {
+                    "id": 2,
+                    "type": "Run",
+                    "start_date": "2026-03-03T08:00:00Z",
+                    "distance": 8000,
+                    "average_speed": 2.5,
+                },
+                {
+                    "id": 3,
+                    "type": "Run",
+                    "start_date": "2026-03-10T08:00:00Z",
+                    "distance": 16000,
+                    "average_speed": 2.2222222222,
+                },
+                {
+                    "id": 4,
+                    "type": "Ride",
+                    "start_date": "2026-03-11T08:00:00Z",
+                    "distance": 30000,
+                    "average_speed": 8,
+                },
+            ]
+
+    def fake_get(url, headers, params, timeout):
+        assert url == strava.STRAVA_ACTIVITIES_URL
+        assert headers == {"Authorization": "Bearer valid-access"}
+        assert params["per_page"] == 100
+        assert params["type"] == "Run"
+        assert isinstance(params["after"], int)
+        assert timeout == 15
+        return FakeHttpxResponse()
+
+    monkeypatch.setattr("app.services.strava.httpx.get", fake_get)
+    client = make_client(monkeypatch)
+
+    response = client.get("/api/strava/fitness-summary", headers={"Authorization": "Bearer valid-token"})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "connected": True,
+        "summary": {
+            "weekly_km_recent": 2.2,
+            "longest_run_km_recent": 16.0,
+            "easy_pace_min_per_km": 6.33,
+            "days_per_week": 3,
+            "run_count": 3,
+            "date_range": {"from": "2026-03-01", "to": "2026-03-10"},
+            "data_source": "strava_90_days",
+        },
+    }
+
+
+def test_fitness_summary_returns_note_when_strava_api_fails(monkeypatch):
+    from app.services.strava import StravaFetchError
+
+    mock_auth(monkeypatch)
+    monkeypatch.setattr("app.routers.strava.strava.get_token_row", lambda user_id: {"user_id": user_id})
+    monkeypatch.setattr(
+        "app.routers.strava.strava.compute_fitness_summary",
+        lambda user_id: (_ for _ in ()).throw(StravaFetchError()),
+    )
+    client = make_client(monkeypatch)
+
+    response = client.get("/api/strava/fitness-summary", headers={"Authorization": "Bearer valid-token"})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "connected": True,
+        "summary": None,
+        "note": "Could not fetch Strava data",
+    }
+
+
+def test_fitness_summary_requires_auth(monkeypatch):
+    client = make_client(monkeypatch)
+
+    response = client.get("/api/strava/fitness-summary")
+
+    assert response.status_code == 401

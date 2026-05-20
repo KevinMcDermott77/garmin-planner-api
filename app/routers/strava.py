@@ -47,3 +47,17 @@ def activities(current_user: dict[str, Any] = Depends(get_current_user)) -> dict
 def status(current_user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
     user_id = str(current_user["sub"])
     return strava.get_connection_status(user_id)
+
+
+@router.get("/fitness-summary", responses=AUTH_RESPONSES)
+def fitness_summary(current_user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
+    user_id = str(current_user["sub"])
+    if strava.get_token_row(user_id) is None:
+        return {"connected": False, "summary": None}
+
+    try:
+        summary = strava.compute_fitness_summary(user_id)
+    except strava.StravaFetchError:
+        return {"connected": True, "summary": None, "note": "Could not fetch Strava data"}
+
+    return {"connected": True, "summary": summary}
