@@ -78,6 +78,7 @@ def _decode_token(token: str) -> dict[str, Any]:
         signing_key.key,
         algorithms=["ES256", "RS256"],
         audience="authenticated",
+        leeway=60,
     )
 
 

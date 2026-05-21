@@ -312,27 +312,30 @@ def _coaching_principles_prompt(
     peak_long_run_km = min(32, weekly_km_recent * 0.8)
     race_sim_week = max(1, weeks - 3)
     pace_text = _pace_guidance_prompt(goal, goal_assessment)
+    pattern_text = _weekly_pattern_prompt(profile)
 
     return f"""1. Session structure per week (non-taper weeks):
 - For a 4-day/week plan:
-  - Day 1 of running week: INTERVALS (short repeats, speed work -- the hardest session).
-  - Day 2 of running week: EASY run (recovery from intervals).
-  - Day 3 of running week: TEMPO or marathon-pace work (second quality session).
-  - Day 4 of running week: LONG run (at easy pace, with marathon-pace finish in later weeks).
-  - Rest days fill the remaining 3 days of the week per the athlete's schedule preferences.
-- For a 5-day/week plan, add one more EASY run between tempo and long run.
+  - The weekly pattern MUST be: quality1 on day A, REST on day B, quality2 on day C, long run on day D, easy recovery on day E, with the athlete's days_off filling the remaining slots.
+  - Never place running sessions on 4 consecutive days.
+  - Always have at least one rest day between quality session 1 and quality session 2.
+  - There must also be recovery separation after the long run before the next quality session.
+- For a 5-day/week plan: quality1, easy, quality2, easy, long, with days_off filling the rest.
 - For a 3-day/week plan: one quality session (alternating intervals/tempo), one easy, one long.
-- Every non-cutback, non-taper week MUST follow the pattern: quality1 -> easy -> quality2 -> long, with rest days placed per schedule preferences. Never place two quality sessions on consecutive days.
+- Computed weekly pattern for this athlete:
+{pattern_text}
+- Every non-cutback, non-taper week MUST follow the computed hard/easy structure above. Never place two quality sessions on consecutive days.
 - This athlete requested days_per_week={days_per_week}. Keep every week compatible with that running-day count and the schedule constraints below.
 
 2. Quality session progression:
 {phase_text}
-- Phase 1: Base -- short intervals (400m-800m repeats), easy tempos. Volume building.
-- Phase 2: Development -- mile repeats, threshold work, tempo runs 20-30 min.
-- Phase 3: Specific -- marathon-pace tempo runs 30-40 min, cruise intervals, long runs with MP finish sections.
-- Phase 4: Peak -- progressive long runs, race-simulation tempo, under-and-overs (alternating slightly above and below MP).
-- Final 3 weeks: Taper -- reduce volume, maintain intensity. Short quality sessions.
-- Race week: shakeouts only.
+- Phase 1 (base weeks): quality1 day = short intervals (400m-800m repeats); quality2 day = easy tempo introduction (15-20 min); long day = easy long run; easy recovery day = easy recovery. Sessions feel controlled and building.
+- Phase 2 (development weeks): quality1 day = mile repeats or cruise intervals; quality2 day = threshold tempo (25-30 min); long day = long run with easy effort; easy recovery day = easy recovery. Sessions feel like solid work.
+- Phase 3 (specific weeks): quality1 day = marathon-pace intervals or cruise intervals at MP; quality2 day = marathon-pace tempo (30-40 min); long day = long run WITH marathon-pace finish section (last 5-10km at MP); easy recovery day = easy recovery. Sessions feel race-specific.
+- Phase 4 + peak weeks: quality1 day = under-and-overs or progressive intervals; quality2 day = race-simulation tempo; long day = progressive long run building to MP; easy recovery day = easy recovery. Sessions feel like race prep.
+- Taper weeks: quality1 day = short sharp intervals to maintain neuromuscular sharpness; quality2 day = short MP tempo around 20 min; long day = reduced long run; easy recovery day = easy shakeout. Sessions feel fresh and sharp.
+- Cutback weeks: keep the cutback behavior intentionally lighter. quality1 day = light intervals with reduced volume/intensity; the rest-between day remains REST; quality2 day becomes EASY instead of tempo/MP; long day = reduced long run; easy recovery day = easy. Four running days max, all easy/light except one light interval session.
+- Vary session names, descriptions, and structure week to week within each phase. Do not copy-paste the same interval/tempo template every week; each phase must have a different feel and different session emphasis.
 
 3. Volume calibration:
 - Peak weekly km MUST NOT exceed {peak_weekly_km:.1f}km. Compute as min(weekly_km_recent * 1.3, 65). For a {days_per_week}-day/week plan, the absolute maximum is {absolute_max_km}km/week.
@@ -370,6 +373,106 @@ def _phase_boundaries_prompt(weeks: int) -> str:
     lines.append(f"- Final 3 weeks are weeks {final_start}-{weeks}.")
     lines.append(f"- Race week is week {weeks}.")
     return "\n".join(lines)
+
+
+def _weekly_pattern_prompt(profile: AthleteProfile | None) -> str:
+    if profile is None:
+        return "- No athlete schedule was provided. Build the pattern from days_per_week, long_run_day, quality_day_primary, and days_off when available."
+
+    roles = _computed_day_roles(profile)
+    running_days = roles["running_days"]
+    days_off = roles["days_off"]
+    quality1 = roles["quality1"]
+    quality2 = roles["quality2"]
+    long_day = roles["long_day"]
+    easy_days = roles["easy_days"]
+
+    lines = [
+        f"- running_days={_format_day_list(running_days)}.",
+        f"- quality_day_1={_format_day_role(quality1)} (from athlete_profile.schedule.quality_day_primary).",
+        f"- long_run_day={_format_day_role(long_day)} (from athlete_profile.schedule.long_run_day).",
+    ]
+    if quality2 is not None:
+        lines.append(
+            f"- quality_day_2={_format_day_role(quality2)} (first eligible running day after the long run that is not quality_day_1, not long_run_day, and not the day immediately before long_run_day)."
+        )
+    else:
+        lines.append("- quality_day_2=none (not enough eligible running days after applying days_off, quality_day_1, long_run_day, and the pre-long-run exclusion).")
+    lines.append(f"- easy_days={_format_day_list(easy_days)}.")
+    lines.append("- Day-by-day mandatory schedule derived from the athlete profile:")
+
+    for day in range(7):
+        label = _day_label_from_index(day)
+        if day in days_off:
+            lines.append(f"  - day_of_week {day} ({label}): REST (days_off).")
+        elif day == quality1:
+            lines.append(f"  - day_of_week {day} ({label}): quality session 1 (intervals/speed).")
+        elif day == long_day:
+            lines.append(f"  - day_of_week {day} ({label}): LONG RUN -- mandatory every week.")
+        elif quality2 is not None and day == quality2:
+            lines.append(f"  - day_of_week {day} ({label}): quality session 2 (tempo/MP work).")
+        elif day in easy_days:
+            phase_rule = ""
+            if day == DAY_INDEXES["wed"]:
+                phase_rule = " -- phase rule: TEMPO in base/cutback weeks, EASY in development/specific/peak/taper weeks"
+            lines.append(f"  - day_of_week {day} ({label}): easy recovery run{phase_rule}.")
+
+    lines.append("- EVERY day listed as running MUST have a running session every week.")
+    if running_days:
+        running_numbers = ", ".join(str(day) for day in running_days)
+        lines.append(f"- NEVER place rest on day_of_week {running_numbers} for this athlete because those days are not in days_off.")
+    if days_off:
+        rest_numbers = ", ".join(str(day) for day in days_off)
+        lines.append(f"- day_of_week {rest_numbers} are the only regular rest days because they are days_off.")
+    return "\n".join(lines)
+
+
+def _computed_day_roles(profile: AthleteProfile) -> dict[str, list[int] | int | None]:
+    schedule = profile.schedule
+    days_off = [day for day in range(7) if day in {DAY_INDEXES[name] for name in schedule.days_off}]
+    running_days = [day for day in range(7) if day not in days_off]
+    quality1 = DAY_INDEXES[schedule.quality_day_primary]
+    long_day = DAY_INDEXES[schedule.long_run_day]
+    day_before_long = (long_day - 1) % 7
+
+    quality2_excluded = {quality1, long_day, day_before_long}
+    quality2 = _first_running_day_after(long_day, running_days, quality2_excluded)
+    if quality2 is None:
+        quality2 = next((day for day in running_days if day not in {quality1, long_day}), None)
+
+    anchors = {quality1, long_day}
+    if quality2 is not None:
+        anchors.add(quality2)
+    easy_days = [day for day in running_days if day not in anchors]
+
+    return {
+        "running_days": running_days,
+        "days_off": days_off,
+        "quality1": quality1,
+        "quality2": quality2,
+        "long_day": long_day,
+        "easy_days": easy_days,
+    }
+
+
+def _first_running_day_after(start_day: int, running_days: list[int], excluded: set[int]) -> int | None:
+    for offset in range(1, 8):
+        candidate = (start_day + offset) % 7
+        if candidate in running_days and candidate not in excluded:
+            return candidate
+    return None
+
+
+def _format_day_list(day_indexes: list[int]) -> str:
+    if not day_indexes:
+        return "[]"
+    return "[" + ", ".join(_format_day_role(day) for day in day_indexes) + "]"
+
+
+def _format_day_role(day_index: int | None) -> str:
+    if day_index is None:
+        return "none"
+    return f"{_day_label_from_index(day_index).lower()} (day_of_week {day_index})"
 
 
 def _pace_guidance_prompt(goal: str, goal_assessment: GoalAssessment | None) -> str:
@@ -481,6 +584,8 @@ def _schedule_constraints_prompt(profile: AthleteProfile | None, race_date: date
             "only when a second quality session is safe and appropriate."
         )
 
+    lines.append(_weekly_pattern_prompt(profile))
+
     if _cross_training_allowed(profile):
         lines.append(
             f"- Cross-training is explicitly allowed because profile.cross_training is: {profile.cross_training}."
@@ -578,7 +683,11 @@ def _validate_schedule_preferences(
     if profile is None:
         return
 
-    days_off = {DAY_INDEXES[day] for day in profile.schedule.days_off}
+    roles = _computed_day_roles(profile)
+    days_off = set(roles["days_off"])
+    running_days = set(roles["running_days"])
+    running_session_types = {"easy", "long", "tempo", "intervals", "recovery"}
+
     race_day = requested_race_date.weekday() if requested_race_date is not None else None
     final_week_number = plan.weeks[-1].week_number if plan.weeks else None
     for week in plan.weeks:
@@ -598,21 +707,35 @@ def _validate_schedule_preferences(
                     f"was generated as type '{session.type}'."
                 )
 
-    if _cross_training_allowed(profile):
-        return
+    if not _cross_training_allowed(profile):
+        cross_sessions = [
+            f"week {week.week_number} {_day_label_from_index(session.day_of_week)}"
+            for week in plan.weeks
+            for session in week.sessions
+            if session.type == "cross"
+        ]
+        if cross_sessions:
+            locations = ", ".join(cross_sessions)
+            raise PlanGenerationError(
+                "profile.cross_training is empty/null, but the generated plan contains "
+                f"type 'cross' sessions at: {locations}."
+            )
 
-    cross_sessions = [
-        f"week {week.week_number} {_day_label_from_index(session.day_of_week)}"
-        for week in plan.weeks
-        for session in week.sessions
-        if session.type == "cross"
-    ]
-    if cross_sessions:
-        locations = ", ".join(cross_sessions)
-        raise PlanGenerationError(
-            "profile.cross_training is empty/null, but the generated plan contains "
-            f"type 'cross' sessions at: {locations}."
-        )
+    for week in plan.weeks:
+        sessions_by_day = {session.day_of_week: session for session in week.sessions}
+        for day in running_days:
+            session = sessions_by_day.get(day)
+            if session is None:
+                raise PlanGenerationError(
+                    "Every non-days_off day must have a running session, but "
+                    f"week {week.week_number} {_day_label_from_index(day)} is missing."
+                )
+            if session.type not in running_session_types:
+                raise PlanGenerationError(
+                    "Every non-days_off day must have a running session, but "
+                    f"week {week.week_number} {_day_label_from_index(day)} "
+                    f"was generated as type '{session.type}'."
+                )
 
 
 def _cross_training_allowed(profile: AthleteProfile) -> bool:
