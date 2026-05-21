@@ -114,11 +114,12 @@ def mock_valid_jwks_auth(monkeypatch):
     monkeypatch.setattr("app.auth.PyJWKClient", FakePyJWKClient)
     monkeypatch.setattr("app.auth.jwt.get_unverified_header", lambda token: {"alg": "ES256", "kid": "test-kid"})
 
-    def fake_decode(token, key, algorithms, audience):
+    def fake_decode(token, key, algorithms, audience, leeway):
         assert token == "valid-token"
         assert key == "public-key"
         assert algorithms == ["ES256", "RS256"]
         assert audience == "authenticated"
+        assert leeway == 60
         return authed_user()
 
     monkeypatch.setattr("app.auth.jwt.decode", fake_decode)

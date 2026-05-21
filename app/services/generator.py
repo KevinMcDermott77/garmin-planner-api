@@ -316,7 +316,7 @@ def _coaching_principles_prompt(
 
     return f"""1. Session structure per week (non-taper weeks):
 - For a 4-day/week plan:
-  - The weekly pattern MUST be: quality1 on day A, REST on day B, quality2 on day C, long run on day D, easy recovery on day E, with the athlete's days_off filling the remaining slots.
+  - The weekly pattern MUST be: quality1 on day A, REST on day B, quality2/easy-by-phase on day C, long run on day D, easy recovery on day E, with the athlete's days_off filling the remaining slots.
   - Never place running sessions on 4 consecutive days.
   - Always have at least one rest day between quality session 1 and quality session 2.
   - There must also be recovery separation after the long run before the next quality session.
@@ -329,12 +329,13 @@ def _coaching_principles_prompt(
 
 2. Quality session progression:
 {phase_text}
-- Phase 1 (base weeks): quality1 day = short intervals (400m-800m repeats); quality2 day = easy tempo introduction (15-20 min); long day = easy long run; easy recovery day = easy recovery. Sessions feel controlled and building.
+- Phase 1 (base weeks): quality1 day = short intervals (400m-800m repeats); quality2 day = EASY recovery run when it falls on Sunday/day_of_week=6; long day = easy long run; easy recovery day = easy recovery. Sessions feel controlled and building.
 - Phase 2 (development weeks): quality1 day = mile repeats or cruise intervals; quality2 day = threshold tempo (25-30 min); long day = long run with easy effort; easy recovery day = easy recovery. Sessions feel like solid work.
 - Phase 3 (specific weeks): quality1 day = marathon-pace intervals or cruise intervals at MP; quality2 day = marathon-pace tempo (30-40 min); long day = long run WITH marathon-pace finish section (last 5-10km at MP); easy recovery day = easy recovery. Sessions feel race-specific.
 - Phase 4 + peak weeks: quality1 day = under-and-overs or progressive intervals; quality2 day = race-simulation tempo; long day = progressive long run building to MP; easy recovery day = easy recovery. Sessions feel like race prep.
 - Taper weeks: quality1 day = short sharp intervals to maintain neuromuscular sharpness; quality2 day = short MP tempo around 20 min; long day = reduced long run; easy recovery day = easy shakeout. Sessions feel fresh and sharp.
 - Cutback weeks: keep the cutback behavior intentionally lighter. quality1 day = light intervals with reduced volume/intensity; the rest-between day remains REST; quality2 day becomes EASY instead of tempo/MP; long day = reduced long run; easy recovery day = easy. Four running days max, all easy/light except one light interval session.
+- Sunday (day_of_week=6) session type by phase: BASE and CUTBACK weeks = easy recovery run (NOT tempo, NOT intervals). DEVELOPMENT/SPECIFIC/PEAK weeks = quality session 2 (tempo or MP work). TAPER weeks = easy shakeout or very short tempo only.
 - Vary session names, descriptions, and structure week to week within each phase. Do not copy-paste the same interval/tempo template every week; each phase must have a different feel and different session emphasis.
 
 3. Volume calibration:
@@ -410,7 +411,15 @@ def _weekly_pattern_prompt(profile: AthleteProfile | None) -> str:
         elif day == long_day:
             lines.append(f"  - day_of_week {day} ({label}): LONG RUN -- mandatory every week.")
         elif quality2 is not None and day == quality2:
-            lines.append(f"  - day_of_week {day} ({label}): quality session 2 (tempo/MP work).")
+            if day == DAY_INDEXES["sun"]:
+                lines.append(
+                    f"  - day_of_week {day} ({label}): phase-based running day. "
+                    "Sunday (day_of_week=6) session type by phase: BASE and CUTBACK weeks = easy recovery run "
+                    "(NOT tempo, NOT intervals). DEVELOPMENT/SPECIFIC/PEAK weeks = quality session 2 "
+                    "(tempo or MP work). TAPER weeks = easy shakeout or very short tempo only."
+                )
+            else:
+                lines.append(f"  - day_of_week {day} ({label}): quality session 2 (tempo/MP work).")
         elif day in easy_days:
             phase_rule = ""
             if day == DAY_INDEXES["wed"]:

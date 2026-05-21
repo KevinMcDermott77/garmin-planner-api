@@ -88,11 +88,12 @@ def mock_auth(monkeypatch):
     monkeypatch.setattr("app.auth.PyJWKClient", FakePyJWKClient)
     monkeypatch.setattr("app.auth.jwt.get_unverified_header", lambda _token: {"alg": "ES256"})
 
-    def fake_decode(token, key, algorithms, audience):
+    def fake_decode(token, key, algorithms, audience, leeway):
         assert token == "valid-token"
         assert key == "public-key"
         assert algorithms == ["ES256", "RS256"]
         assert audience == "authenticated"
+        assert leeway == 60
         return {"sub": "00000000-0000-0000-0000-000000000001", "email": "runner@example.com"}
 
     monkeypatch.setattr("app.auth.jwt.decode", fake_decode)
