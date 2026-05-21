@@ -26,6 +26,7 @@ app.add_middleware(
         "http://localhost:3000",
         "http://localhost:3001",
         "https://garmin-planner-web-production.up.railway.app",
+        "https://app.paceplan.usetradebot.app",
     ],
     allow_credentials=True,
     allow_methods=["*"],
