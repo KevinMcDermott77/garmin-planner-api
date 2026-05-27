@@ -110,6 +110,8 @@ def generate_plan(
         try:
             _validate_race_session(plan, race_date, goal_assessment)
             _validate_schedule_preferences(plan, race_date, profile)
+            if current_fitness is not None:
+                _validate_interval_paces(plan, weeks)
         except PlanGenerationError as exc:
             final_error = exc
             continue
@@ -573,6 +575,16 @@ def _progressive_pace_prompt(
             f"intervals={p['intervals_low']}-{p['intervals_high']}/km, "
             f"long={p['long_low']}-{p['long_high']}/km"
         )
+    lines += [
+        "CRITICAL: structured workout steps (target_low, target_high) MUST use exactly the pace "
+        "values from the table above for each phase. Do NOT use your own pace estimates. For "
+        "interval steps, target_low = faster pace (lower number), target_high = slower pace "
+        "(higher number) from the correct phase row. These are non-negotiable.",
+        "Easy and recovery sessions must have pace_low_min_per_km=null and "
+        "pace_high_min_per_km=null. Do not assign pace targets to easy or recovery sessions.",
+        "Warmup and cooldown steps must have target_type='none', target_low=null, "
+        "target_high=null. Only interval and tempo steps carry pace targets.",
+    ]
     return "\n".join(lines)
 
 
@@ -836,6 +848,22 @@ def _validate_schedule_preferences(
                     f"week {week.week_number} {_day_label_from_index(day)} "
                     f"was generated as type '{session.type}'."
                 )
+
+
+def _validate_interval_paces(plan: Plan, weeks: int) -> None:
+    phase1_end = max(1, int(weeks * 0.25))
+    for week in plan.weeks:
+        if week.week_number > phase1_end:
+            continue
+        for session in week.sessions:
+            for step in session.steps:
+                if step.step_type == "interval" and step.target_low is not None:
+                    if step.target_low < 4.7:
+                        raise PlanGenerationError(
+                            f"Phase 1 interval step in week {week.week_number} has "
+                            f"target_low={step.target_low:.2f} min/km (faster than 4:42/km); "
+                            "pace targets must match the phase pace table."
+                        )
 
 
 def _cross_training_allowed(profile: AthleteProfile) -> bool:
