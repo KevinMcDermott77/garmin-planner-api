@@ -110,6 +110,7 @@ def generate_plan(
         try:
             _validate_race_session(plan, race_date, goal_assessment)
             _validate_schedule_preferences(plan, race_date, profile)
+            _validate_easy_recovery_paces(plan)
             if current_fitness is not None:
                 _validate_interval_paces(plan, weeks)
         except PlanGenerationError as exc:
@@ -565,7 +566,12 @@ def _progressive_pace_prompt(
     if taper_start <= weeks:
         phases.append(("Taper", f"weeks {taper_start}-{weeks}", 1.0))
 
-    lines = ["PACE TARGETS BY PHASE (use these exact ranges):"]
+    lines = [
+        "MANDATORY: For sessions where type is 'easy' or 'recovery', the fields "
+        "pace_low_min_per_km and pace_high_min_per_km in the session JSON MUST be null. "
+        "Setting these to any numeric value is an error.",
+        "PACE TARGETS BY PHASE (use these exact ranges):",
+    ]
     for label, week_range, r in phases:
         p = _phase_paces(r, easy_pace, current_mp, goal_mp)
         lines.append(
@@ -580,8 +586,6 @@ def _progressive_pace_prompt(
         "values from the table above for each phase. Do NOT use your own pace estimates. For "
         "interval steps, target_low = faster pace (lower number), target_high = slower pace "
         "(higher number) from the correct phase row. These are non-negotiable.",
-        "Easy and recovery sessions must have pace_low_min_per_km=null and "
-        "pace_high_min_per_km=null. Do not assign pace targets to easy or recovery sessions.",
         "Warmup and cooldown steps must have target_type='none', target_low=null, "
         "target_high=null. Only interval and tempo steps carry pace targets.",
     ]
@@ -848,6 +852,20 @@ def _validate_schedule_preferences(
                     f"week {week.week_number} {_day_label_from_index(day)} "
                     f"was generated as type '{session.type}'."
                 )
+
+
+def _validate_easy_recovery_paces(plan: Plan) -> None:
+    for week in plan.weeks:
+        for session in week.sessions:
+            if session.type in {"easy", "recovery"}:
+                if session.pace_low_min_per_km is not None or session.pace_high_min_per_km is not None:
+                    day_label = _day_label_from_index(session.day_of_week)
+                    raise PlanGenerationError(
+                        f"Week {week.week_number} {day_label} is type '{session.type}' but has "
+                        f"pace_low_min_per_km={session.pace_low_min_per_km}, "
+                        f"pace_high_min_per_km={session.pace_high_min_per_km}; "
+                        "easy and recovery sessions must have null pace fields."
+                    )
 
 
 def _validate_interval_paces(plan: Plan, weeks: int) -> None:

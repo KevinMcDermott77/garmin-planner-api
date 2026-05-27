@@ -327,8 +327,8 @@ def test_generator_retries_when_schedule_preferences_are_violated(monkeypatch):
                         "description": "Easy recovery run",
                         "distance_km": 6.0,
                         "duration_min": 38,
-                        "pace_low_min_per_km": 6.2,
-                        "pace_high_min_per_km": 6.6,
+                        "pace_low_min_per_km": None,
+                        "pace_high_min_per_km": None,
                         "steps": [],
                     },
                     {
@@ -337,8 +337,8 @@ def test_generator_retries_when_schedule_preferences_are_violated(monkeypatch):
                         "description": "Recovery run",
                         "distance_km": 5.0,
                         "duration_min": 32,
-                        "pace_low_min_per_km": 6.3,
-                        "pace_high_min_per_km": 6.8,
+                        "pace_low_min_per_km": None,
+                        "pace_high_min_per_km": None,
                         "steps": [],
                     },
                     {
@@ -689,8 +689,8 @@ def test_generator_uses_progressive_paces_when_current_fitness_provided(monkeypa
                     "description": "Easy run",
                     "distance_km": 8.0,
                     "duration_min": 48,
-                    "pace_low_min_per_km": 6.0,
-                    "pace_high_min_per_km": 6.5,
+                    "pace_low_min_per_km": None,
+                    "pace_high_min_per_km": None,
                     "steps": [],
                 }
             ],
