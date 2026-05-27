@@ -488,6 +488,7 @@ def test_generate_returns_saved_plan(monkeypatch):
         return Plan.model_validate(payload), {"input": 10, "output": 20, "max": 64000}
 
     monkeypatch.setattr("app.routers.plans.generate_plan", fake_generate_plan)
+    monkeypatch.setattr("app.routers.plans.strava.compute_fitness_summary", lambda user_id: None)
 
     def fake_save_profile(profile, user_id):
         persistence_calls["save_profile_user_id"] = user_id
@@ -667,6 +668,144 @@ def test_get_and_list_plans_scope_to_current_user(monkeypatch):
     list_response = client.get("/api/plans", headers={"Authorization": "Bearer valid-token"})
     assert list_response.status_code == 200
     assert [row["id"] for row in list_response.json()] == ["plan-123"]
+
+
+def test_generator_uses_progressive_paces_when_current_fitness_provided(monkeypatch):
+    from app.services import generator
+
+    current_fitness = {
+        "easy_pace_min_per_km": 6.08,
+        "predicted_finish_minutes": 245.35,
+    }
+
+    def make_week(n: int) -> dict:
+        return {
+            "week_number": n,
+            "focus": f"Week {n}",
+            "sessions": [
+                {
+                    "day_of_week": 0,
+                    "type": "easy",
+                    "description": "Easy run",
+                    "distance_km": 8.0,
+                    "duration_min": 48,
+                    "pace_low_min_per_km": 6.0,
+                    "pace_high_min_per_km": 6.5,
+                    "steps": [],
+                }
+            ],
+        }
+
+    plan_json = {
+        "goal": "sub-4 marathon",
+        "race_date": None,
+        "weeks": [make_week(n) for n in range(1, 21)],
+    }
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr(generator.anthropic, "Anthropic", lambda api_key: object())
+    monkeypatch.setattr(generator.time, "sleep", lambda _seconds: None)
+    prompts: list[str] = []
+    system_prompts: list[str] = []
+
+    def fake_create_message(_client, message, system_prompt):
+        prompts.append(message)
+        system_prompts.append(system_prompt)
+        return FakeClaudeResponse(json.dumps(plan_json))
+
+    monkeypatch.setattr(generator, "_create_message", fake_create_message)
+
+    plan, _ = generator.generate_plan(
+        goal="sub-4 marathon",
+        weeks=20,
+        history_summary=None,
+        current_fitness=current_fitness,
+    )
+
+    assert len(plan.weeks) == 20
+    prompt = prompts[0]
+    sys_prompt = system_prompts[0]
+
+    assert "PACE TARGETS BY PHASE" in prompt
+    assert "PACE TARGETS BY PHASE" in sys_prompt
+    # Phase 1 easy_low is anchored to Strava easy pace (6.08 → 6:05)
+    assert "6:05" in prompt
+    # Phase 4 long_low = goal MP (sub-4 = 240/42.195 → 5:41)
+    assert "5:41" in prompt
+    # Phase 1 tempo_low ≈ 5:25 (current_mp=5.81 - 24s)
+    assert "5:25" in prompt
+    # Phase 4 tempo_low ≈ 5:00 (goal_mp=5.69 - 41s)
+    assert "5:00" in prompt
+
+
+def test_generate_endpoint_passes_strava_fitness_to_generator(monkeypatch):
+    captured_kwargs: dict[str, Any] = {}
+
+    def fake_generate_plan(**kwargs):
+        captured_kwargs.update(kwargs)
+        payload = {
+            "goal": kwargs["goal"],
+            "race_date": kwargs["race_date"],
+            "weeks": [
+                {
+                    "week_number": 1,
+                    "focus": "Base week",
+                    "sessions": [
+                        {
+                            "day_of_week": 0,
+                            "type": "easy",
+                            "description": "Easy run",
+                            "distance_km": 5.0,
+                            "duration_min": 30,
+                            "pace_low_min_per_km": 6.0,
+                            "pace_high_min_per_km": 6.5,
+                            "steps": [],
+                        }
+                    ],
+                }
+            ],
+        }
+        return Plan.model_validate(payload), {"input": 10, "output": 20, "max": 64000}
+
+    monkeypatch.setattr("app.routers.plans.generate_plan", fake_generate_plan)
+    monkeypatch.setattr(
+        "app.routers.plans.strava.compute_fitness_summary",
+        lambda user_id: {"easy_pace_min_per_km": 6.08, "weekly_km_recent": 45.0},
+    )
+
+    def fake_save_profile(profile, user_id): return "profiles-1"
+    def fake_save_plan(**kwargs): return "plans-1"
+
+    monkeypatch.setattr("app.routers.plans.persistence.save_profile", fake_save_profile)
+    monkeypatch.setattr("app.routers.plans.persistence.save_plan", fake_save_plan)
+    mock_valid_jwks_auth(monkeypatch)
+    client = make_client(monkeypatch)
+
+    response = client.post(
+        "/api/plans/generate",
+        headers={"Authorization": "Bearer valid-token"},
+        json={
+            "profile": {
+                "name": "Test Runner",
+                "weekly_km_recent": 45,
+                "longest_run_km_recent": 21,
+                "easy_pace_min_per_km": 6.08,
+                "days_per_week": 4,
+            },
+            "goal": "sub-4 marathon",
+            "weeks": 4,
+            "race_date": None,
+            "history_summary": None,
+        },
+    )
+
+    assert response.status_code == 200
+    assert "current_fitness" in captured_kwargs
+    cf = captured_kwargs["current_fitness"]
+    assert cf is not None
+    assert cf["easy_pace_min_per_km"] == 6.08
+    assert "predicted_finish_minutes" in cf
+    assert cf["predicted_finish_minutes"] is not None
 
 
 def test_dev_token_route_is_not_registered_by_default(monkeypatch):

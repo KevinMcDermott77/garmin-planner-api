@@ -54,6 +54,22 @@ def generate_plan_endpoint(
         request.history_summary,
         available_weeks=request.weeks,
     )
+
+    current_fitness = None
+    try:
+        strava_summary = strava.compute_fitness_summary(user_id)
+        if (
+            strava_summary
+            and strava_summary.get("easy_pace_min_per_km") is not None
+            and assessment.user_predicted_minutes is not None
+        ):
+            current_fitness = {
+                "easy_pace_min_per_km": strava_summary["easy_pace_min_per_km"],
+                "predicted_finish_minutes": assessment.user_predicted_minutes,
+            }
+    except Exception:
+        pass
+
     try:
         plan, tokens = generate_plan(
             goal=request.goal,
@@ -63,6 +79,7 @@ def generate_plan_endpoint(
             notes=request.notes,
             profile=request.profile,
             goal_assessment=assessment,
+            current_fitness=current_fitness,
         )
     except PlanGenerationError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc

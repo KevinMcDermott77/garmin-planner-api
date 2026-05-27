@@ -16,7 +16,7 @@ from app.services.models import Plan
 from app.services.profile import AthleteProfile
 from app.services.sanity_check import GoalAssessment
 
-MODEL = "claude-opus-4-5"
+MODEL = "claude-sonnet-4-6"
 MAX_TOKENS = 64000
 MAX_ATTEMPTS = 3
 TEMPERATURE = 0.3
@@ -54,6 +54,7 @@ def generate_plan(
     notes: str | None = None,
     profile: AthleteProfile | None = None,
     goal_assessment: GoalAssessment | None = None,
+    current_fitness: dict[str, Any] | None = None,
 ) -> tuple[Plan, dict[str, int | str]]:
     """Generate and validate a structured running plan using Claude."""
     api_key = os.getenv("ANTHROPIC_API_KEY")
@@ -69,6 +70,7 @@ def generate_plan(
         notes,
         profile,
         goal_assessment,
+        current_fitness,
     )
     final_error: Exception | None = None
 
@@ -80,7 +82,7 @@ def generate_plan(
 
         user_message = base_user_prompt if attempt == 1 else _retry_prompt(final_error, base_user_prompt)
         try:
-            response = _create_message(client, user_message, _system_prompt(goal, weeks, profile, race_date, goal_assessment))
+            response = _create_message(client, user_message, _system_prompt(goal, weeks, profile, race_date, goal_assessment, current_fitness))
         except Exception as exc:  # noqa: BLE001
             raise PlanGenerationError(f"Claude API call failed: {exc}") from exc
 
@@ -152,8 +154,9 @@ def _system_prompt(
     profile: AthleteProfile | None = None,
     race_date: date | None = None,
     goal_assessment: GoalAssessment | None = None,
+    current_fitness: dict[str, Any] | None = None,
 ) -> str:
-    coaching_principles = _coaching_principles_prompt(goal, weeks, profile, goal_assessment)
+    coaching_principles = _coaching_principles_prompt(goal, weeks, profile, goal_assessment, current_fitness)
     prompt = """
 You are an experienced running coach creating a personalised training plan.
 
@@ -266,6 +269,7 @@ def _user_prompt(
     notes: str | None,
     profile: AthleteProfile | None,
     goal_assessment: GoalAssessment | None,
+    current_fitness: dict[str, Any] | None = None,
 ) -> str:
     payload = {
         "goal": goal,
@@ -276,7 +280,7 @@ def _user_prompt(
         "goal_assessment": goal_assessment.model_dump(mode="json") if goal_assessment else None,
         "history_summary": history_summary,
     }
-    coaching_principles = _coaching_principles_prompt(goal, weeks, profile, goal_assessment)
+    coaching_principles = _coaching_principles_prompt(goal, weeks, profile, goal_assessment, current_fitness)
     return (
         "Create a personalised running plan from this request, athlete profile, "
         "goal assessment, and Garmin history if present.\n"
@@ -302,6 +306,7 @@ def _coaching_principles_prompt(
     weeks: int,
     profile: AthleteProfile | None,
     goal_assessment: GoalAssessment | None,
+    current_fitness: dict[str, Any] | None = None,
 ) -> str:
     days_per_week = profile.days_per_week if profile else 4
     weekly_km_recent = profile.weekly_km_recent if profile else 40.0
@@ -311,7 +316,7 @@ def _coaching_principles_prompt(
     absolute_max_km = 65 if days_per_week <= 4 else 75
     peak_long_run_km = min(32, weekly_km_recent * 0.8)
     race_sim_week = max(1, weeks - 3)
-    pace_text = _pace_guidance_prompt(goal, goal_assessment)
+    pace_text = _pace_guidance_prompt(goal, goal_assessment, current_fitness, weeks)
     pattern_text = _weekly_pattern_prompt(profile)
 
     return f"""1. Session structure per week (non-taper weeks):
@@ -484,9 +489,24 @@ def _format_day_role(day_index: int | None) -> str:
     return f"{_day_label_from_index(day_index).lower()} (day_of_week {day_index})"
 
 
-def _pace_guidance_prompt(goal: str, goal_assessment: GoalAssessment | None) -> str:
+def _pace_guidance_prompt(
+    goal: str,
+    goal_assessment: GoalAssessment | None,
+    current_fitness: dict[str, Any] | None = None,
+    weeks: int = 20,
+) -> str:
     goal_minutes = _goal_minutes(goal, goal_assessment)
     distance_km = _race_distance_km(goal, goal_assessment)
+
+    if (
+        current_fitness is not None
+        and current_fitness.get("easy_pace_min_per_km") is not None
+        and current_fitness.get("predicted_finish_minutes") is not None
+        and goal_minutes is not None
+        and distance_km is not None
+    ):
+        return _progressive_pace_prompt(current_fitness, goal_minutes, distance_km, weeks)
+
     if goal_minutes is None or distance_km is None:
         return (
             "- No exact target time was detected. Use athlete easy pace, recent history, "
@@ -512,6 +532,77 @@ def _pace_guidance_prompt(goal: str, goal_assessment: GoalAssessment | None) -> 
         f"intervals={_format_pace_value(interval_low)}-{_format_pace_value(interval_high)}/km, "
         f"recovery={_format_pace_value(recovery)}/km+."
     )
+
+
+def _progressive_pace_prompt(
+    current_fitness: dict[str, Any],
+    goal_minutes: float,
+    distance_km: float,
+    weeks: int,
+) -> str:
+    """Build phase-by-phase pace targets interpolating from current fitness to goal paces."""
+    easy_pace = float(current_fitness["easy_pace_min_per_km"])
+    predicted_minutes = float(current_fitness["predicted_finish_minutes"])
+
+    current_mp = predicted_minutes / distance_km
+    goal_mp = goal_minutes / distance_km
+
+    phase1_end = max(1, int(weeks * 0.25))
+    phase2_end = max(phase1_end + 1, int(weeks * 0.5))
+    phase3_end = max(phase2_end + 1, int(weeks * 0.75))
+    phase4_end = max(phase3_end, weeks - 3)
+    taper_start = phase4_end + 1
+
+    phases: list[tuple[str, str, float]] = [
+        ("Phase 1", f"weeks 1-{phase1_end}", 0.0),
+        ("Phase 2", f"weeks {phase1_end + 1}-{phase2_end}", 0.33),
+        ("Phase 3", f"weeks {phase2_end + 1}-{phase3_end}", 0.66),
+    ]
+    if phase3_end + 1 <= phase4_end:
+        phases.append(("Phase 4/peak", f"weeks {phase3_end + 1}-{phase4_end}", 1.0))
+    if taper_start <= weeks:
+        phases.append(("Taper", f"weeks {taper_start}-{weeks}", 1.0))
+
+    lines = ["PACE TARGETS BY PHASE (use these exact ranges):"]
+    for label, week_range, r in phases:
+        p = _phase_paces(r, easy_pace, current_mp, goal_mp)
+        lines.append(
+            f"{label} ({week_range}): "
+            f"easy={p['easy_low']}-{p['easy_high']}/km, "
+            f"tempo={p['tempo_low']}-{p['tempo_high']}/km, "
+            f"intervals={p['intervals_low']}-{p['intervals_high']}/km, "
+            f"long={p['long_low']}-{p['long_high']}/km"
+        )
+    return "\n".join(lines)
+
+
+def _phase_paces(r: float, easy_pace: float, current_mp: float, goal_mp: float) -> dict[str, str]:
+    """Compute pace range strings for a phase at interpolation ratio r (0=current, 1=goal)."""
+    def lerp(a: float, b: float) -> float:
+        return a + r * (b - a)
+
+    easy_low = lerp(easy_pace, goal_mp + 4 / 60)
+    easy_high = easy_low + 15 / 60
+
+    long_low = lerp(current_mp + 12 / 60, goal_mp)
+    long_high = lerp(current_mp + 37 / 60, goal_mp + 19 / 60)
+
+    tempo_low = lerp(current_mp - 24 / 60, goal_mp - 41 / 60)
+    tempo_high = lerp(current_mp - 4 / 60, goal_mp - 21 / 60)
+
+    intervals_low = lerp(current_mp - 54 / 60, goal_mp - 61 / 60)
+    intervals_high = lerp(current_mp - 39 / 60, goal_mp - 45 / 60)
+
+    return {
+        "easy_low": _format_pace_value(easy_low),
+        "easy_high": _format_pace_value(easy_high),
+        "long_low": _format_pace_value(long_low),
+        "long_high": _format_pace_value(long_high),
+        "tempo_low": _format_pace_value(tempo_low),
+        "tempo_high": _format_pace_value(tempo_high),
+        "intervals_low": _format_pace_value(intervals_low),
+        "intervals_high": _format_pace_value(intervals_high),
+    }
 
 
 def _goal_minutes(goal: str, goal_assessment: GoalAssessment | None) -> float | None:
