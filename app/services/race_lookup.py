@@ -9,7 +9,7 @@ from typing import Any, Literal
 import anthropic
 from pydantic import BaseModel, Field, ValidationError
 
-MODEL = "claude-opus-4-5"
+MODEL = "claude-sonnet-4-6"
 MAX_TOKENS = 1600
 TEMPERATURE = 0
 

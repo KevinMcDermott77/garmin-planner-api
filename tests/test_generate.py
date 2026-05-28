@@ -347,8 +347,8 @@ def test_generator_retries_when_schedule_preferences_are_violated(monkeypatch):
                         "description": "Friday long run",
                         "distance_km": 16.0,
                         "duration_min": 100,
-                        "pace_low_min_per_km": 6.2,
-                        "pace_high_min_per_km": 6.6,
+                        "pace_low_min_per_km": None,
+                        "pace_high_min_per_km": None,
                         "steps": [],
                     },
                     {

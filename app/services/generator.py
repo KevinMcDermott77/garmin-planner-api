@@ -111,6 +111,7 @@ def generate_plan(
             _validate_race_session(plan, race_date, goal_assessment)
             _validate_schedule_preferences(plan, race_date, profile)
             _validate_easy_recovery_paces(plan)
+            _validate_long_run_paces(plan, race_date)
             if current_fitness is not None:
                 _validate_interval_paces(plan, weeks)
         except PlanGenerationError as exc:
@@ -197,19 +198,22 @@ Programming rules:
 - Include at least one rest day every week.
 - Keep sessions realistic for the athlete's recent volume and longest run.
 - Use steps for structured workouts when useful, especially intervals and tempo work.
-- Every unstructured running session must include a concrete target pace range.
-  For easy, long, and recovery sessions with distance_km set and steps=[],
-  populate pace_low_min_per_km and pace_high_min_per_km. Derive the range from
-  the athlete's current easy pace when supplied, and from the goal pace and
-  session type when a time goal is supplied. For a marathon goal with marathon
-  pace (MP), useful defaults are:
-  - easy: roughly MP + 0:45 to MP + 1:15 per km
-  - long: roughly MP + 0:30 to MP + 1:00 per km
-  - recovery: roughly MP + 1:00 to MP + 1:30 per km
-  Use comparable effort-based ranges for other distances. Keep paces realistic
-  for the athlete's recent training. Tempo and intervals keep pace targets in
-  their steps only, with top-level pace fields null. Rest and cross sessions
-  must also leave top-level pace fields null.
+- Easy, long, and recovery sessions are effort-based; set pace_low_min_per_km=null
+  and pace_high_min_per_km=null for all of them. The only exception is the race
+  session (type 'long' on race_date), which should carry the goal race pace range.
+  Tempo and intervals keep pace targets in their steps only, with top-level pace
+  fields null. Rest and cross sessions must also leave top-level pace fields null.
+- Long run sessions must use target_type='none' on ALL steps including the main run
+  step. Long runs are effort-based ('conversational pace', 'easy effort'). Only a
+  step that is explicitly a marathon-pace finish section (e.g. 'final 5km at MP')
+  may use target_type='pace' on an interval step. The main long run body must never
+  carry a pace target.
+- Interval sessions: the description must include RPE (e.g. '8-9/10 effort'). The
+  interval steps should still have target_low/target_high from the phase pace table
+  for watch guidance. But the description should lead with effort, not pace.
+- Warmup and cooldown steps MUST have target_type='none', target_low=null,
+  target_high=null. They should be simple distance-based steps with no intensity
+  target whatsoever.
 
 Return ONLY valid JSON. Do not include markdown, code fences, comments, preamble,
 or explanatory text.
@@ -248,9 +252,10 @@ The JSON must match this schema exactly:
 }
 
 day_of_week uses 0=Monday through 6=Sunday.
-pace_low_min_per_km and pace_high_min_per_km are required for easy, long, and
-recovery sessions when steps=[]; they are decimal minutes per kilometre. For
-tempo and intervals, leave top-level pace fields null because pace lives in
+pace_low_min_per_km and pace_high_min_per_km must be null for easy, long, and
+recovery sessions; these are effort-based. The race session (type long, on
+race_date) is the only exception: set its pace fields to the goal race pace range.
+For tempo and intervals, leave top-level pace fields null because pace lives in
 steps. For rest and cross sessions, leave top-level pace fields null.
 For rest days, use distance_km=null, duration_min=null, pace_low_min_per_km=null,
 pace_high_min_per_km=null, and steps=[].
@@ -582,12 +587,23 @@ def _progressive_pace_prompt(
             f"long={p['long_low']}-{p['long_high']}/km"
         )
     lines += [
+        "MANDATORY: Long run sessions must have pace_low_min_per_km=null and "
+        "pace_high_min_per_km=null at the top level. Long runs are effort-based "
+        "('conversational pace', 'easy effort'). Long run steps must use "
+        "target_type='none' on ALL steps including the main run step. Only an "
+        "interval step that is explicitly a marathon-pace finish section (e.g. "
+        "'final 5km at MP') may use target_type='pace'. The main long run body "
+        "must never carry a pace target.",
         "CRITICAL: structured workout steps (target_low, target_high) MUST use exactly the pace "
         "values from the table above for each phase. Do NOT use your own pace estimates. For "
         "interval steps, target_low = faster pace (lower number), target_high = slower pace "
         "(higher number) from the correct phase row. These are non-negotiable.",
-        "Warmup and cooldown steps must have target_type='none', target_low=null, "
-        "target_high=null. Only interval and tempo steps carry pace targets.",
+        "Interval sessions: the description must include RPE (e.g. '8-9/10 effort'). "
+        "Interval steps should still have target_low/target_high from the phase pace table "
+        "for watch guidance. The description must lead with effort, not pace.",
+        "Warmup and cooldown steps MUST have target_type='none', target_low=null, "
+        "target_high=null. They must be simple distance-based steps with no intensity "
+        "target whatsoever.",
     ]
     return "\n".join(lines)
 
@@ -852,6 +868,38 @@ def _validate_schedule_preferences(
                     f"week {week.week_number} {_day_label_from_index(day)} "
                     f"was generated as type '{session.type}'."
                 )
+
+
+def _validate_long_run_paces(plan: Plan, race_date: date | None) -> None:
+    final_week_number = plan.weeks[-1].week_number if plan.weeks else None
+    race_day = race_date.weekday() if race_date is not None else None
+
+    for week in plan.weeks:
+        for session in week.sessions:
+            if session.type != "long":
+                continue
+            # The race session is exempt — it carries goal pace fields by design.
+            if (
+                race_date is not None
+                and week.week_number == final_week_number
+                and session.day_of_week == race_day
+            ):
+                continue
+            day_label = _day_label_from_index(session.day_of_week)
+            if session.pace_low_min_per_km is not None or session.pace_high_min_per_km is not None:
+                raise PlanGenerationError(
+                    f"Week {week.week_number} {day_label} long run has "
+                    f"pace_low_min_per_km={session.pace_low_min_per_km}, "
+                    f"pace_high_min_per_km={session.pace_high_min_per_km}; "
+                    "training long runs must have null top-level pace fields."
+                )
+            for step in session.steps:
+                if step.step_type in {"warmup", "cooldown", "recovery"} and step.target_type == "pace":
+                    raise PlanGenerationError(
+                        f"Week {week.week_number} {day_label} long run has a "
+                        f"'{step.step_type}' step with target_type='pace'; "
+                        "only interval steps in long runs may carry pace targets."
+                    )
 
 
 def _validate_easy_recovery_paces(plan: Plan) -> None:
